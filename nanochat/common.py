@@ -4,8 +4,11 @@ Common utilities for nanochat.
 
 import os
 import re
+import time
+import http.client
 import logging
 import urllib.request
+import urllib.error
 import torch
 import torch.distributed as dist
 from filelock import FileLock
@@ -79,6 +82,57 @@ def get_base_dir():
     os.makedirs(nanochat_dir, exist_ok=True)
     return nanochat_dir
 
+def _download_file(url, file_path, max_retries=5):
+    """Download to a .part file with retry/resume and atomically publish it."""
+    part_path = file_path + ".part"
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        expected_size = None
+        try:
+            existing_size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+            headers = {"Range": f"bytes={existing_size}-"} if existing_size > 0 else {}
+            request = urllib.request.Request(url, headers=headers)
+
+            with urllib.request.urlopen(request, timeout=60) as response:
+                if existing_size > 0 and response.status == 206:
+                    content_range = response.headers.get("Content-Range", "")
+                    if "/" in content_range:
+                        expected_size = int(content_range.rsplit("/", 1)[1])
+                    mode = "ab"
+                else:
+                    # The server ignored Range, so restart from the beginning.
+                    existing_size = 0
+                    if response.status == 200:
+                        content_length = response.headers.get("Content-Length")
+                        if content_length:
+                            expected_size = int(content_length)
+                    mode = "wb"
+
+                with open(part_path, mode) as f:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+
+            actual_size = os.path.getsize(part_path)
+            if expected_size is not None and actual_size != expected_size:
+                raise OSError(f"Incomplete download: {actual_size}/{expected_size} bytes")
+
+            os.replace(part_path, file_path)
+            return
+        except (http.client.IncompleteRead, urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+            last_error = exc
+            if attempt == max_retries:
+                break
+            wait_seconds = min(2 ** (attempt - 1), 10)
+            print(f"Download failed ({exc}); retrying in {wait_seconds}s...")
+            time.sleep(wait_seconds)
+
+    raise RuntimeError(f"Failed to download {url} after {max_retries} attempts") from last_error
+
+
 def download_file_with_lock(url, filename, postprocess_fn=None):
     """
     Downloads a file from a URL to a local path in the base directory.
@@ -99,14 +153,8 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
         if os.path.exists(file_path):
             return file_path
 
-        # Download the content as bytes
         print(f"Downloading {url}...")
-        with urllib.request.urlopen(url) as response:
-            content = response.read() # bytes
-
-        # Write to local file
-        with open(file_path, 'wb') as f:
-            f.write(content)
+        _download_file(url, file_path)
         print(f"Downloaded to {file_path}")
 
         # Run the postprocess function if provided

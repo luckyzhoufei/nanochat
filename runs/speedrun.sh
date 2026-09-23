@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning)
 # It is designed to run on a blank 8XH100 GPU node and takes approximately 1.5 hours to complete.
@@ -26,6 +27,22 @@ command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync --extra gpu
 # activate venv so that `python` uses the project's venv instead of system python
 source .venv/bin/activate
+
+# Download the CORE evaluation bundle before spending GPU time. If the network is
+# temporarily unavailable, fail here instead of after pretraining has started.
+python - <<'PY'
+import os
+
+from nanochat.common import download_file_with_lock, get_base_dir
+from scripts.base_eval import EVAL_BUNDLE_URL, place_eval_bundle
+
+base_dir = get_base_dir()
+eval_bundle_dir = os.path.join(base_dir, "eval_bundle")
+if not os.path.isdir(eval_bundle_dir):
+    zip_path = download_file_with_lock(EVAL_BUNDLE_URL, "eval_bundle.zip")
+    if not os.path.isdir(eval_bundle_dir):
+        place_eval_bundle(zip_path)
+PY
 
 # -----------------------------------------------------------------------------
 # wandb setup
