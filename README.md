@@ -43,6 +43,40 @@ For development (adds pytest, matplotlib, ipykernel, transformers, etc.):
 uv sync --extra gpu --group dev
 ```
 
+### On-policy distillation
+
+[scripts/chat_distill.py](scripts/chat_distill.py) distills a HuggingFace causal
+LM into an existing nanochat SFT checkpoint. The student samples each response,
+the teacher scores that exact response, and the student minimizes the
+forward-KL policy-gradient objective. By default this targets
+`Qwen/Qwen3.8-27B`.
+
+Install the optional teacher dependencies and start a single-GPU run:
+
+```bash
+uv sync --extra gpu --extra distill
+python -m scripts.chat_distill \
+    --teacher-load-in-4bit \
+    --num-steps=100 \
+    --samples-per-prompt=8
+```
+
+The defaults use `temperature=1` and no top-k truncation, which keeps the
+rollouts strictly on-policy. nanochat and Qwen use different tokenizers, so the
+objective compares each sequence's mean per-token log-probability instead of
+trying to align individual logits. Checkpoints are written to
+`chatdistill_checkpoints/`. A full-precision 27B teacher needs roughly 54 GB of
+parameter storage before activations, so 4-bit loading is the practical default
+for small GPU nodes.
+
+For an 8-GPU run, each rank needs enough memory for the student plus the local
+teacher. Use 4-bit loading if a full teacher replica does not fit:
+
+```bash
+torchrun --standalone --nproc_per_node=8 -m scripts.chat_distill -- \
+    --teacher-load-in-4bit --run=distill
+```
+
 ### Reproduce and talk to GPT-2
 
 The most fun you can have is to train your own GPT-2 and talk to it. The entire pipeline to do so is contained in the single file [runs/speedrun.sh](runs/speedrun.sh), which is designed to be run on an 8XH100 GPU node. Boot up a new 8XH100 GPU box from your favorite provider (e.g. I use and like [Lambda](https://lambda.ai/service/gpu-cloud)), and kick off the training script:
@@ -173,6 +207,7 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
 │   ├── base_train.py               # Base model: train
 │   ├── chat_cli.py                 # Chat model: talk to over CLI
+│   ├── chat_distill.py             # Chat model: on-policy distillation
 │   ├── chat_eval.py                # Chat model: eval tasks
 │   ├── chat_rl.py                  # Chat model: reinforcement learning
 │   ├── chat_sft.py                 # Chat model: train SFT

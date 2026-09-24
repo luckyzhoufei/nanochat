@@ -58,6 +58,12 @@ cpu = [
 gpu = [
     "torch==2.9.1",
 ]
+distill = [
+    "accelerate>=1.10.0",
+    "bitsandbytes>=0.48.0",
+    "safetensors>=0.6.0",
+    "transformers>=4.57.0",
+]
 
 [tool.uv]
 default-groups = []
