@@ -41,9 +41,12 @@ def conversation_to_teacher_prompt(conversation: dict) -> list[dict[str, str]]:
         )
         messages = messages[1:]
 
-    if messages[-1]["role"] != "assistant":
-        raise ValueError("The final message in a distillation prompt must be from the assistant")
-    prompt_messages = messages[:-1]
+    if messages[-1]["role"] == "assistant":
+        prompt_messages = messages[:-1] # remove the reference assistant response
+    elif messages[-1]["role"] == "user":
+        prompt_messages = messages
+    else:
+        raise ValueError("The final message must be from the assistant or user")
     if not prompt_messages or prompt_messages[-1]["role"] != "user":
         raise ValueError("The prompt must end with a user message")
 
@@ -117,8 +120,8 @@ def student_sequence_logprobs(
 
 def fit_prompt_to_context(
     prompt_ids: list[int],
-    sequence_len: int,
-    max_new_tokens: int,
+    sequence_len: int,   # 学生模型的最大上下文长度
+    max_new_tokens: int,   # 答案的最大token数
 ) -> tuple[list[int], int]:
     """Reserve generation tokens and left-truncate prompts that are too long."""
     if sequence_len < 2:

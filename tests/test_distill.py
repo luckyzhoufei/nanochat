@@ -50,6 +50,16 @@ def test_conversation_to_teacher_prompt_replaces_reference_answer():
     assert prompt == [{"role": "user", "content": "Be concise.\n\nWhat is 2+2?"}]
 
 
+def test_conversation_to_teacher_prompt_accepts_user_ending():
+    conversation = {
+        "messages": [
+            {"role": "user", "content": "Tell me a joke"},
+        ]
+    }
+    prompt = conversation_to_teacher_prompt(conversation)
+    assert prompt == [{"role": "user", "content": "Tell me a joke"}]
+
+
 def test_qwen_teacher_scores_only_response_tokens():
     teacher = QwenTeacher.__new__(QwenTeacher)
     teacher.device = torch.device("cpu")

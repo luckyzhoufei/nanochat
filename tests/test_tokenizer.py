@@ -134,3 +134,12 @@ def test_render_for_completion(tokenizer):
     # the assistant response itself must not be present
     stripped = tokenizer.encode("this gets stripped")
     assert not any(ids[i:i + len(stripped)] == stripped for i in range(len(ids)))
+
+
+def test_render_for_completion_accepts_user_ending(tokenizer):
+    conversation = {"messages": [
+        {"role": "user", "content": "hi"},
+    ]}
+    ids = tokenizer.render_for_completion(conversation)
+    assert ids[-1] == tokenizer.encode_special("<|assistant_start|>")
+    assert tokenizer.encode("hi") == ids[2:-2]

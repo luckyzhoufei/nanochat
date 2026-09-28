@@ -240,15 +240,16 @@ class RustBPETokenizer:
 
     def render_for_completion(self, conversation):
         """
-        Used during Reinforcement Learning. In that setting, we want to
-        render the conversation priming the Assistant for a completion.
-        Unlike the Chat SFT case, we don't need to return the mask.
+        Render a conversation prompting the Assistant for a completion.
+        Works with either a reference assistant message, which is removed, or
+        a conversation that already ends on a user message.
         """
-        # We have some surgery to do: we need to pop the last message (of the Assistant)
         conversation = copy.deepcopy(conversation) # avoid mutating the original
         messages = conversation["messages"]
-        assert messages[-1]["role"] == "assistant", "Last message must be from the Assistant"
-        messages.pop() # remove the last message (of the Assistant) inplace
+        assert messages, "Conversation has no messages"
+        if messages[-1]["role"] == "assistant":
+            messages.pop() # remove the reference assistant response
+        assert messages[-1]["role"] == "user", "Last message must be from the Assistant or user"
 
         # Now tokenize the conversation
         ids, mask = self.render_conversation(conversation)
