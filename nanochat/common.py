@@ -9,6 +9,7 @@ import http.client
 import logging
 import urllib.request
 import urllib.error
+from datetime import timedelta
 import torch
 import torch.distributed as dist
 from filelock import FileLock
@@ -219,7 +220,7 @@ def autodetect_device_type():
     print0(f"Autodetected device type: {device_type}")
     return device_type
 
-def compute_init(device_type="cuda"): # cuda|cpu|mps
+def compute_init(device_type="cuda", timeout_minutes=10): # cuda|cpu|mps
     """Basic initialization that we keep doing over and over, so make common."""
 
     assert device_type in ["cuda", "mps", "cpu"], "Invalid device type atm"
@@ -246,7 +247,11 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
     if is_ddp_requested and device_type == "cuda":
         device = torch.device("cuda", ddp_local_rank)
         torch.cuda.set_device(device)  # make "cuda" default to this device
-        dist.init_process_group(backend="nccl", device_id=device)
+        dist.init_process_group(
+            backend="nccl",
+            device_id=device,
+            timeout=timedelta(minutes=timeout_minutes),
+        )
         dist.barrier()
     else:
         device = torch.device(device_type) # mps|cpu

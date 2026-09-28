@@ -27,11 +27,24 @@ fi
 
 WANDB_RUN="${WANDB_RUN:-distill_2gpu}"
 TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen3.8-27B}"
+export TEACHER_MODEL
+
+# Download once in the launcher instead of making both training ranks race on
+# the HuggingFace cache. Skip with SKIP_TEACHER_DOWNLOAD=1 after the first run.
+if [ -z "${SKIP_TEACHER_DOWNLOAD:-}" ]; then
+    python - <<'PY'
+import os
+from huggingface_hub import snapshot_download
+
+snapshot_download(os.environ["TEACHER_MODEL"])
+PY
+fi
 
 # One process per GPU keeps the existing nanochat optimizer's gradient
 # synchronization and ZeRO-2 sharding active across both devices.
 torchrun --standalone --nproc_per_node=2 -m scripts.chat_distill -- \
     --run="$WANDB_RUN" \
     --teacher-model="$TEACHER_MODEL" \
+    --teacher-local-files-only \
     --teacher-load-in-4bit \
     "$@"

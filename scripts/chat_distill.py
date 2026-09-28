@@ -20,7 +20,6 @@ torchrun --standalone --nproc_per_node=N -m scripts.chat_distill -- --run=distil
 """
 
 import argparse
-import itertools
 import math
 import os
 import time
@@ -28,6 +27,7 @@ import time
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
+import torch.distributed as dist
 import wandb
 
 from nanochat.checkpoint_manager import load_model, save_checkpoint
@@ -58,6 +58,7 @@ parser = argparse.ArgumentParser(description="On-policy distillation for nanocha
 # Logging and runtime.
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
+parser.add_argument("--nccl-timeout-minutes", type=int, default=30, help="distributed collective timeout")
 # Student checkpoint.
 parser.add_argument("--source", type=str, default="sft", choices=["sft", "rl"], help="student checkpoint family")
 parser.add_argument("--model-tag", type=str, default=None, help="student model tag to load")
@@ -135,6 +136,8 @@ args = parser.parse_args()
 
 if args.num_steps <= 0:
     parser.error("--num-steps must be positive")
+if args.nccl_timeout_minutes <= 0:
+    parser.error("--nccl-timeout-minutes must be positive")
 if args.prompts_per_step <= 0:
     parser.error("--prompts-per-step must be positive")
 if args.samples_per_prompt <= 1:
@@ -163,7 +166,10 @@ if args.teacher_load_in_4bit is False and args.teacher_load_in_8bit is False:
 # Compute, student, tokenizer, and teacher setup.
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
-ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
+ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(
+    device_type,
+    timeout_minutes=args.nccl_timeout_minutes,
+)
 master_process = ddp_rank == 0
 if args.teacher_load_in_8bit:
     args.teacher_load_in_4bit = False
@@ -189,20 +195,30 @@ student, tokenizer, _ = load_model(
 engine = Engine(student, tokenizer)
 
 teacher_device = device if args.teacher_device == "" else torch.device(args.teacher_device)
-teacher = QwenTeacher(
-    model_name=args.teacher_model,
-    device=teacher_device,
-    dtype=args.teacher_dtype,
-    load_in_4bit=args.teacher_load_in_4bit,
-    load_in_8bit=args.teacher_load_in_8bit,
-    attn_implementation=args.teacher_attn_implementation,
-    max_seq_len=args.teacher_max_seq_len,
-    local_files_only=args.teacher_local_files_only,
-)
-print0(
-    f"Rank {ddp_rank}/{ddp_world_size}: loaded teacher {args.teacher_model} on {teacher_device} "
-    f"(4bit={args.teacher_load_in_4bit}, 8bit={args.teacher_load_in_8bit})"
-)
+teacher = None
+for load_rank in range(ddp_world_size):
+    if ddp_rank == load_rank:
+        print(
+            f"[rank {ddp_rank}/{ddp_world_size}] loading teacher "
+            f"{args.teacher_model} on {teacher_device}",
+            flush=True,
+        )
+        teacher = QwenTeacher(
+            model_name=args.teacher_model,
+            device=teacher_device,
+            dtype=args.teacher_dtype,
+            load_in_4bit=args.teacher_load_in_4bit,
+            load_in_8bit=args.teacher_load_in_8bit,
+            attn_implementation=args.teacher_attn_implementation,
+            max_seq_len=args.teacher_max_seq_len,
+            local_files_only=args.teacher_local_files_only,
+        )
+        print(f"[rank {ddp_rank}/{ddp_world_size}] teacher loaded", flush=True)
+    # Loading two 27B copies concurrently can exhaust host RAM and make one
+    # rank arrive at the first collective long before the other.
+    if ddp:
+        dist.barrier()
+assert teacher is not None
 
 # -----------------------------------------------------------------------------
 # Prompt mixture. The final assistant target is used only to identify the turn
@@ -215,15 +231,6 @@ train_tasks = [
 ]
 train_dataset = TaskMixture(train_tasks)
 print0(f"Prompt mixture: {len(train_dataset):,} conversations")
-
-
-def prompt_iterator():
-    indices = itertools.cycle(range(ddp_rank, len(train_dataset), ddp_world_size))
-    for index in indices:
-        yield index, train_dataset[index]
-
-
-prompt_iter = prompt_iterator()
 
 
 def next_seed(step: int, prompt_idx: int, sampling_idx: int) -> int:
@@ -388,6 +395,11 @@ student_logprob_sum = 0.0
 valid_sequence_count = 0
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 
+# Do not let the first rank enter the optimizer collectives while another rank
+# is still loading the model, tokenizer, teacher, or prompt datasets.
+if ddp:
+    dist.barrier()
+
 for step in range(args.num_steps):
     synchronize()
     step_start = time.time()
@@ -397,7 +409,10 @@ for step in range(args.num_steps):
     prompt_losses = []
     prompt_response_lengths = []
     for prompt_idx in range(args.prompts_per_step):
-        _, conversation = next(prompt_iter)
+        # Both ranks consume the same prompt but sample different responses.
+        # This keeps teacher sequence lengths and per-step work closer together.
+        dataset_index = (step * args.prompts_per_step + prompt_idx) % len(train_dataset)
+        conversation = train_dataset[dataset_index]
         sequences, sampled_masks, teacher_scores = sample_and_score(
             conversation,
             step,
