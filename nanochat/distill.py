@@ -115,6 +115,28 @@ def student_sequence_logprobs(
     return token_logprobs.sum(dim=1) / counts
 
 
+def fit_prompt_to_context(
+    prompt_ids: list[int],
+    sequence_len: int,
+    max_new_tokens: int,
+) -> tuple[list[int], int]:
+    """Reserve generation tokens and left-truncate prompts that are too long."""
+    if sequence_len < 2:
+        raise ValueError("The student sequence length must be at least 2")
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive")
+
+    # nanochat appends <|assistant_start|> after rendering, so prompts can be
+    # one token longer than the model context before generation begins.
+    target_new_tokens = min(max_new_tokens, sequence_len - 1)
+    max_prompt_tokens = sequence_len - target_new_tokens
+    if len(prompt_ids) > max_prompt_tokens:
+        # Keep the most recent conversation context and the assistant marker.
+        prompt_ids = prompt_ids[-max_prompt_tokens:]
+    available_new_tokens = sequence_len - len(prompt_ids)
+    return prompt_ids, min(max_new_tokens, available_new_tokens)
+
+
 def on_policy_advantages(
     teacher_logprobs: torch.Tensor,
     student_logprobs: torch.Tensor,

@@ -36,6 +36,7 @@ from nanochat.common import (
 from nanochat.distill import (
     QwenTeacher,
     conversation_to_teacher_prompt,
+    fit_prompt_to_context,
     on_policy_advantages,
     on_policy_kl_objective,
     student_sequence_logprobs,
@@ -230,13 +231,11 @@ def sampled_response_byte_ranges(
 def sample_and_score(conversation: dict, step: int, prompt_idx: int):
     """Sample student responses and score their exact text with the teacher."""
     prompt_ids = tokenizer.render_for_completion(conversation)
-    available_tokens = student.config.sequence_len - len(prompt_ids)
-    if available_tokens <= 0:
-        raise ValueError(
-            f"Prompt length {len(prompt_ids)} leaves no room for generation "
-            f"(student sequence length {student.config.sequence_len})"
-        )
-    max_new_tokens = min(args.max_new_tokens, available_tokens)
+    prompt_ids, max_new_tokens = fit_prompt_to_context(
+        prompt_ids,
+        sequence_len=student.config.sequence_len,
+        max_new_tokens=args.max_new_tokens,
+    )
     teacher_prompt = conversation_to_teacher_prompt(conversation)
 
     sequences = []

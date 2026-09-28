@@ -7,6 +7,7 @@ import torch
 from nanochat.distill import (
     QwenTeacher,
     conversation_to_teacher_prompt,
+    fit_prompt_to_context,
     on_policy_advantages,
     on_policy_kl_objective,
     response_token_mask_from_offsets,
@@ -59,6 +60,29 @@ def test_qwen_teacher_scores_only_response_tokens():
     assert score is not None
     assert score.num_tokens == 3
     assert torch.allclose(torch.tensor(score.logprob), torch.tensor(-math.log(5.0)))
+
+
+def test_fit_prompt_to_context_reserves_generation_budget():
+    prompt_ids = list(range(2049))
+    fitted, max_new_tokens = fit_prompt_to_context(
+        prompt_ids,
+        sequence_len=2048,
+        max_new_tokens=256,
+    )
+    assert len(fitted) == 1792
+    assert fitted[-1] == 2048
+    assert max_new_tokens == 256
+
+
+def test_fit_prompt_to_context_keeps_short_prompt():
+    prompt_ids = list(range(10))
+    fitted, max_new_tokens = fit_prompt_to_context(
+        prompt_ids,
+        sequence_len=2048,
+        max_new_tokens=256,
+    )
+    assert fitted == prompt_ids
+    assert max_new_tokens == 256
 
 
 def test_response_token_mask_from_offsets():
