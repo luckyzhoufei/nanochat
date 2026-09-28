@@ -69,12 +69,18 @@ trying to align individual logits. Checkpoints are written to
 parameter storage before activations, so 4-bit loading is the practical default
 for small GPU nodes.
 
-For an 8-GPU run, each rank needs enough memory for the student plus the local
-teacher. Use 4-bit loading if a full teacher replica does not fit:
+For a two-GPU run, use the dedicated launcher. It starts exactly one rank per
+GPU, and each rank keeps a local 4-bit teacher replica:
 
 ```bash
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_distill -- \
-    --teacher-load-in-4bit --run=distill
+bash runs/distill_2gpu.sh
+```
+
+Equivalent manual command:
+
+```bash
+torchrun --standalone --nproc_per_node=2 -m scripts.chat_distill -- \
+    --teacher-load-in-4bit --run=distill_2gpu
 ```
 
 ### Reproduce and talk to GPT-2
@@ -199,6 +205,7 @@ I've published a number of guides that might contain helpful information, most r
 │   └── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
 ├── pyproject.toml
 ├── runs
+│   ├── distill_2gpu.sh             # Two-GPU on-policy distillation
 │   ├── miniseries.sh               # Miniseries training script
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
 │   ├── scaling_laws.sh             # Scaling laws experiments

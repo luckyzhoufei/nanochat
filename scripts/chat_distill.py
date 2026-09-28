@@ -10,9 +10,13 @@ Single GPU:
 
 python -m scripts.chat_distill --teacher-load-in-4bit
 
-Multi-GPU:
+Two GPUs (recommended entry point):
 
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_distill -- --run=distill
+bash runs/distill_2gpu.sh
+
+Any other GPU count:
+
+torchrun --standalone --nproc_per_node=N -m scripts.chat_distill -- --run=distill
 """
 
 import argparse
@@ -140,6 +144,11 @@ if not 0.0 <= args.warmup_ratio < 1.0:
     parser.error("--warmup-ratio must be in [0, 1)")
 if args.temperature != 1.0 or args.top_k != 0:
     print0("WARNING: temperature=1 and top-k=0 are required for strictly on-policy rollouts.")
+if args.teacher_load_in_4bit is False and args.teacher_load_in_8bit is False:
+    print0(
+        "WARNING: the teacher is loaded in full precision on every rank. "
+        "Use --teacher-load-in-4bit for a 27B teacher."
+    )
 
 # -----------------------------------------------------------------------------
 # Compute, student, tokenizer, and teacher setup.
@@ -176,7 +185,7 @@ teacher = QwenTeacher(
     local_files_only=args.teacher_local_files_only,
 )
 print0(
-    f"Loaded teacher {args.teacher_model} on {teacher_device} "
+    f"Rank {ddp_rank}/{ddp_world_size}: loaded teacher {args.teacher_model} on {teacher_device} "
     f"(4bit={args.teacher_load_in_4bit}, 8bit={args.teacher_load_in_8bit})"
 )
 
