@@ -25,6 +25,8 @@ import math
 import os
 import time
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
 import wandb
 
@@ -80,7 +82,12 @@ parser.add_argument(
     choices=["auto", "bfloat16", "float16", "float32"],
     help="teacher compute dtype",
 )
-parser.add_argument("--teacher-load-in-4bit", action="store_true", help="load the teacher with NF4 quantization")
+parser.add_argument(
+    "--teacher-load-in-4bit",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="load the teacher with NF4 quantization (default: enabled)",
+)
 parser.add_argument("--teacher-load-in-8bit", action="store_true", help="load the teacher with int8 quantization")
 parser.add_argument(
     "--teacher-attn-implementation",
@@ -101,6 +108,7 @@ parser.add_argument("--num-steps", type=int, default=100, help="number of optimi
 parser.add_argument("--prompts-per-step", type=int, default=1, help="prompts sampled per rank per optimizer step")
 parser.add_argument("--samples-per-prompt", type=int, default=8, help="student responses sampled per prompt")
 parser.add_argument("--device-batch-size", type=int, default=8, help="generation batch size per forward pass")
+parser.add_argument("--loss-batch-size", type=int, default=2, help="rollouts per student forward/backward chunk")
 # Generation. These defaults keep the data exactly on-policy.
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
 parser.add_argument("--temperature", type=float, default=1.0, help="student sampling temperature")
@@ -124,7 +132,6 @@ parser.add_argument("--gsm8k-epochs", type=int, default=1, help="GSM8K copies in
 parser.add_argument("--save-every", type=int, default=50, help="save a checkpoint every N steps")
 parser.add_argument("--seed", type=int, default=42, help="sampling seed")
 args = parser.parse_args()
-user_config = vars(args).copy()
 
 if args.num_steps <= 0:
     parser.error("--num-steps must be positive")
@@ -134,6 +141,8 @@ if args.samples_per_prompt <= 1:
     parser.error("--samples-per-prompt must be at least 2 to estimate a within-prompt baseline")
 if args.device_batch_size <= 0:
     parser.error("--device-batch-size must be positive")
+if args.loss_batch_size <= 0:
+    parser.error("--loss-batch-size must be positive")
 if args.max_new_tokens <= 0:
     parser.error("--max-new-tokens must be positive")
 if args.teacher_max_seq_len <= 0:
@@ -156,6 +165,12 @@ if args.teacher_load_in_4bit is False and args.teacher_load_in_8bit is False:
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0
+if args.teacher_load_in_8bit:
+    args.teacher_load_in_4bit = False
+if device_type != "cuda" and args.teacher_load_in_4bit:
+    print0("Disabling default 4-bit teacher loading because CUDA is not available.")
+    args.teacher_load_in_4bit = False
+user_config = vars(args).copy()
 
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
@@ -284,6 +299,8 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
                 )
             )
 
+    if device_type == "cuda":
+        torch.cuda.empty_cache()
     return sequences, sampled_masks, teacher_scores
 
 
@@ -394,16 +411,23 @@ for step in range(args.num_steps):
         # Invalid teacher rows must not contribute to the student objective.
         targets = targets.masked_fill(~teacher_valid.unsqueeze(1), -1)
 
-        student.train()
-        student_token_logprobs = -student(
-            inputs,
-            targets,
-            loss_reduction="none",
-        ).view_as(inputs)
-        student_logprobs = student_sequence_logprobs(student_token_logprobs, targets)
+        # The first pass is only needed to estimate the sequence baseline.
+        # Running it without autograd keeps all rollout activations out of VRAM.
+        student.eval()
+        student_logprob_chunks = []
+        for b0 in range(0, inputs.size(0), args.loss_batch_size):
+            b1 = min(b0 + args.loss_batch_size, inputs.size(0))
+            with torch.no_grad():
+                token_logprobs = -student(
+                    inputs[b0:b1],
+                    targets[b0:b1],
+                    loss_reduction="none",
+                ).view_as(inputs[b0:b1])
+                student_logprob_chunks.append(student_sequence_logprobs(token_logprobs, targets[b0:b1]))
+        student_logprobs = torch.cat(student_logprob_chunks)
         advantages = on_policy_advantages(
             teacher_logprobs,
-            student_logprobs.detach(),
+            student_logprobs,
             teacher_valid,
         )
 
@@ -411,20 +435,31 @@ for step in range(args.num_steps):
         num_valid_sequences = teacher_valid.sum()
         if bool(teacher_valid.any()):
             prompt_teacher_logprob = teacher_logprobs[teacher_valid].mean().item()
-            prompt_student_logprob = student_logprobs.detach()[teacher_valid].mean().item()
+            prompt_student_logprob = student_logprobs[teacher_valid].mean().item()
             prompt_advantages = advantages[teacher_valid]
             teacher_logprob_sum += prompt_teacher_logprob * int(num_valid_sequences.item())
             student_logprob_sum += prompt_student_logprob * int(num_valid_sequences.item())
             valid_sequence_count += int(num_valid_sequences.item())
             prompt_rewards.append(prompt_advantages.mean().item())
 
-        # Token log-probs and sequence-level advantages can be large. The
-        # global token normalizer keeps updates comparable across response lengths.
-        loss = on_policy_kl_objective(student_token_logprobs, targets, advantages)
-        loss = loss / num_valid_tokens / args.prompts_per_step
         if bool(teacher_valid.any()):
-            loss.backward()
-            prompt_losses.append(loss.detach().item())
+            # A second chunked pass accumulates gradients. This avoids holding
+            # full-batch logits and activations for all sampled responses.
+            student.train()
+            prompt_loss = 0.0
+            for b0 in range(0, inputs.size(0), args.loss_batch_size):
+                b1 = min(b0 + args.loss_batch_size, inputs.size(0))
+                token_logprobs = -student(
+                    inputs[b0:b1],
+                    targets[b0:b1],
+                    loss_reduction="none",
+                ).view_as(inputs[b0:b1])
+                loss = on_policy_kl_objective(token_logprobs, targets[b0:b1], advantages[b0:b1])
+                loss = loss / num_valid_tokens / args.prompts_per_step
+                loss.backward()
+                prompt_loss += loss.detach().item()
+                del token_logprobs, loss
+            prompt_losses.append(prompt_loss)
         else:
             zero_loss(student).backward()
 

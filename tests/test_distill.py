@@ -151,3 +151,19 @@ def test_on_policy_kl_objective_has_expected_gradient():
         token_logprobs.grad,
         torch.tensor([[-1.0, -1.0], [1.0, 1.0]]),
     )
+
+
+def test_chunked_kl_objective_matches_full_batch():
+    token_logprobs = torch.tensor([
+        [-1.0, -2.0],
+        [-3.0, -4.0],
+        [-5.0, -6.0],
+    ])
+    targets = torch.ones_like(token_logprobs, dtype=torch.long)
+    advantages = torch.tensor([1.0, -1.0, 0.5])
+    full = on_policy_kl_objective(token_logprobs, targets, advantages)
+    chunked = (
+        on_policy_kl_objective(token_logprobs[:1], targets[:1], advantages[:1])
+        + on_policy_kl_objective(token_logprobs[1:], targets[1:], advantages[1:])
+    )
+    assert torch.allclose(full, chunked)

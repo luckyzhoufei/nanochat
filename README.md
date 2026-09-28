@@ -67,7 +67,17 @@ objective compares each sequence's mean per-token log-probability instead of
 trying to align individual logits. Checkpoints are written to
 `chatdistill_checkpoints/`. A full-precision 27B teacher needs roughly 54 GB of
 parameter storage before activations, so 4-bit loading is the practical default
-for small GPU nodes.
+for small GPU nodes. Use `--no-teacher-load-in-4bit` only when the whole teacher
+fits comfortably alongside the student.
+
+If the student forward still runs out of memory, lower the rollout batch sizes:
+
+```bash
+bash runs/distill_2gpu.sh \
+    --samples-per-prompt=4 \
+    --device-batch-size=2 \
+    --loss-batch-size=1
+```
 
 For a two-GPU run, use the dedicated launcher. It starts exactly one rank per
 GPU, and each rank keeps a local 4-bit teacher replica:
