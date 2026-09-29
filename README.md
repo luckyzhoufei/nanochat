@@ -47,9 +47,12 @@ uv sync --extra gpu --group dev
 
 [scripts/chat_distill.py](scripts/chat_distill.py) distills a HuggingFace causal
 LM into an existing nanochat SFT checkpoint. The student samples each response,
-the teacher scores that exact response, and the student minimizes the
-forward-KL policy-gradient objective. By default this targets
-`Qwen/Qwen3.8-27B`.
+the teacher scores that exact response, and the student trains on the
+teacher-selected samples. The default `rejection` objective keeps the highest
+scoring `--keep-top-k` student responses and applies cross-entropy to those
+student-generated tokens. The older `--objective=pg` mode remains available,
+but its high-variance sequence-level policy gradient can cause catastrophic
+forgetting. By default this targets `Qwen/Qwen3.8-27B`.
 
 Install the optional teacher dependencies and start a single-GPU run:
 

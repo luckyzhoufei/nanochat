@@ -45,6 +45,7 @@ from nanochat.distill import (
     fit_prompt_to_context,
     on_policy_advantages,
     on_policy_kl_objective,
+    select_teacher_ranked_samples,
     student_sequence_logprobs,
 )
 from nanochat.engine import Engine
@@ -63,6 +64,7 @@ parser.add_argument("--nccl-timeout-minutes", type=int, default=30, help="distri
 parser.add_argument("--source", type=str, default="sft", choices=["sft", "rl"], help="student checkpoint family")
 parser.add_argument("--model-tag", type=str, default=None, help="student model tag to load")
 parser.add_argument("--model-step", type=int, default=None, help="student model step to load")
+parser.add_argument("--output-tag", type=str, default=None, help="checkpoint tag to save; defaults to --model-tag")
 # Teacher.
 parser.add_argument(
     "--teacher-model",
@@ -110,6 +112,13 @@ parser.add_argument("--prompts-per-step", type=int, default=1, help="prompts sam
 parser.add_argument("--samples-per-prompt", type=int, default=8, help="student responses sampled per prompt")
 parser.add_argument("--device-batch-size", type=int, default=8, help="generation batch size per forward pass")
 parser.add_argument("--loss-batch-size", type=int, default=2, help="rollouts per student forward/backward chunk")
+parser.add_argument(
+    "--objective",
+    choices=["rejection", "pg"],
+    default="rejection",
+    help="stable teacher-ranked SFT or high-variance on-policy policy gradient",
+)
+parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked samples kept for rejection objective")
 # Generation. These defaults keep the data exactly on-policy.
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
 parser.add_argument("--temperature", type=float, default=1.0, help="student sampling temperature")
@@ -146,6 +155,8 @@ if args.device_batch_size <= 0:
     parser.error("--device-batch-size must be positive")
 if args.loss_batch_size <= 0:
     parser.error("--loss-batch-size must be positive")
+if args.keep_top_k <= 0:
+    parser.error("--keep-top-k must be positive")
 if args.max_new_tokens <= 0:
     parser.error("--max-new-tokens must be positive")
 if args.teacher_max_seq_len <= 0:
@@ -387,7 +398,7 @@ def zero_loss(model: torch.nn.Module) -> torch.Tensor:
 
 base_dir = get_base_dir()
 depth = student.config.n_layer
-output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+output_dirname = args.output_tag or args.model_tag or f"d{depth}"
 checkpoint_dir = os.path.join(base_dir, "chatdistill_checkpoints", output_dirname)
 total_training_time = 0.0
 teacher_logprob_sum = 0.0
@@ -423,8 +434,19 @@ for step in range(args.num_steps):
             sampled_masks,
             teacher_scores,
         )
-        # Invalid teacher rows must not contribute to the student objective.
-        targets = targets.masked_fill(~teacher_valid.unsqueeze(1), -1)
+        if args.objective == "rejection":
+            selected = select_teacher_ranked_samples(
+                teacher_logprobs,
+                teacher_valid,
+                args.keep_top_k,
+            )
+            metric_mask = teacher_valid & selected
+        else:
+            selected = teacher_valid
+            metric_mask = teacher_valid
+
+        # Invalid or unselected rows must not contribute to the student objective.
+        targets = targets.masked_fill(~metric_mask.unsqueeze(1), -1)
 
         # The first pass is only needed to estimate the sequence baseline.
         # Running it without autograd keeps all rollout activations out of VRAM.
@@ -440,24 +462,29 @@ for step in range(args.num_steps):
                 ).view_as(inputs[b0:b1])
                 student_logprob_chunks.append(student_sequence_logprobs(token_logprobs, targets[b0:b1]))
         student_logprobs = torch.cat(student_logprob_chunks)
-        advantages = on_policy_advantages(
-            teacher_logprobs,
-            student_logprobs,
-            teacher_valid,
-        )
+        if args.objective == "pg":
+            advantages = on_policy_advantages(
+                teacher_logprobs,
+                student_logprobs,
+                metric_mask,
+            )
+        else:
+            # Selected samples receive uniform weight; the objective is an
+            # ordinary cross-entropy loss on student-generated responses.
+            advantages = metric_mask.to(dtype=student_logprobs.dtype)
 
         num_valid_tokens = (targets >= 0).sum().clamp_min(1)
-        num_valid_sequences = teacher_valid.sum()
-        if bool(teacher_valid.any()):
-            prompt_teacher_logprob = teacher_logprobs[teacher_valid].mean().item()
-            prompt_student_logprob = student_logprobs[teacher_valid].mean().item()
-            prompt_advantages = advantages[teacher_valid]
+        num_valid_sequences = metric_mask.sum()
+        if bool(metric_mask.any()):
+            prompt_teacher_logprob = teacher_logprobs[metric_mask].mean().item()
+            prompt_student_logprob = student_logprobs[metric_mask].mean().item()
+            prompt_advantages = advantages[metric_mask]
             teacher_logprob_sum += prompt_teacher_logprob * int(num_valid_sequences.item())
             student_logprob_sum += prompt_student_logprob * int(num_valid_sequences.item())
             valid_sequence_count += int(num_valid_sequences.item())
             prompt_rewards.append(prompt_advantages.mean().item())
 
-        if bool(teacher_valid.any()):
+        if bool(metric_mask.any()):
             # A second chunked pass accumulates gradients. This avoids holding
             # full-batch logits and activations for all sampled responses.
             student.train()
@@ -494,10 +521,11 @@ for step in range(args.num_steps):
     mean_reward = sum(prompt_rewards) / max(1, len(prompt_rewards))
     mean_loss = sum(prompt_losses) / max(1, len(prompt_losses))
     mean_response_length = sum(prompt_response_lengths) / max(1, len(prompt_response_lengths))
+    score_label = "advantage" if args.objective == "pg" else "teacher_score"
     print0(
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.4f} | "
-        f"advantage: {mean_reward:.5f} | response_len: {mean_response_length:.1f} | "
+        f"{score_label}: {mean_reward:.5f} | response_len: {mean_response_length:.1f} | "
         f"lrm: {lrm:.3f} | dt: {step_time * 1000:.0f}ms"
     )
     wandb_run.log({
@@ -505,7 +533,7 @@ for step in range(args.num_steps):
         "train/loss": mean_loss,
         "train/teacher_logprob": mean_teacher_logprob,
         "train/student_logprob": mean_student_logprob,
-        "train/advantage": mean_reward,
+        "train/objective_score": mean_reward,
         "train/response_length": mean_response_length,
         "train/lrm": lrm,
         "train/dt": step_time,

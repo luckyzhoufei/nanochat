@@ -11,6 +11,7 @@ from nanochat.distill import (
     on_policy_advantages,
     on_policy_kl_objective,
     response_token_mask_from_offsets,
+    select_teacher_ranked_samples,
     student_sequence_logprobs,
 )
 
@@ -145,6 +146,20 @@ def test_on_policy_advantages_use_centered_student_minus_teacher():
     advantages = on_policy_advantages(teacher, student, valid)
     # Raw advantages are [-2, 0], centered to [-1, 1].
     assert torch.allclose(advantages, torch.tensor([-1.0, 1.0, 0.0]))
+
+
+def test_select_teacher_ranked_samples_keeps_highest_valid_scores():
+    teacher_logprobs = torch.tensor([-3.0, -1.0, -2.0, -0.5])
+    valid = torch.tensor([True, True, False, True])
+    selected = select_teacher_ranked_samples(teacher_logprobs, valid, keep_top_k=2)
+    assert selected.tolist() == [False, True, False, True]
+
+
+def test_select_teacher_ranked_samples_handles_fewer_valid_than_k():
+    teacher_logprobs = torch.tensor([-3.0, -1.0])
+    valid = torch.tensor([False, True])
+    selected = select_teacher_ranked_samples(teacher_logprobs, valid, keep_top_k=2)
+    assert selected.tolist() == [False, True]
 
 
 def test_on_policy_kl_objective_has_expected_gradient():

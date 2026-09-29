@@ -167,6 +167,25 @@ def on_policy_advantages(
     return advantages.masked_fill(~valid, 0.0)
 
 
+def select_teacher_ranked_samples(
+    teacher_logprobs: torch.Tensor,
+    valid: torch.Tensor,
+    keep_top_k: int,
+) -> torch.Tensor:
+    """Select the highest-scoring valid teacher samples for SFT distillation."""
+    if keep_top_k <= 0:
+        raise ValueError("keep_top_k must be positive")
+    valid = valid.to(device=teacher_logprobs.device, dtype=torch.bool)
+    selected = torch.zeros_like(valid)
+    valid_indices = valid.nonzero(as_tuple=False).squeeze(1)
+    if valid_indices.numel() == 0:
+        return selected
+    keep = min(keep_top_k, valid_indices.numel())
+    top_local = torch.topk(teacher_logprobs[valid_indices], k=keep).indices
+    selected[valid_indices[top_local]] = True
+    return selected
+
+
 def on_policy_kl_objective(
     token_logprobs: torch.Tensor,
     targets: torch.Tensor,
