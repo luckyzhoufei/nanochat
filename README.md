@@ -93,6 +93,17 @@ torchrun --standalone --nproc_per_node=2 -m scripts.chat_distill -- \
     --teacher-load-in-4bit --run=distill_2gpu
 ```
 
+To compare the distilled and RL checkpoints on the same held-out tasks, use the
+dedicated launcher so both `rustbpe` and the other project dependencies are
+installed in the active virtual environment:
+
+```bash
+bash runs/compare_2gpu.sh --tasks='MMLU|GSM8K'
+```
+
+The comparison writes JSON and CSV results under `NANOCHAT_BASE_DIR`. When all
+standard tasks are evaluated, both models also receive the same ChatCORE score.
+
 ### Reproduce and talk to GPT-2
 
 The most fun you can have is to train your own GPT-2 and talk to it. The entire pipeline to do so is contained in the single file [runs/speedrun.sh](runs/speedrun.sh), which is designed to be run on an 8XH100 GPU node. Boot up a new 8XH100 GPU box from your favorite provider (e.g. I use and like [Lambda](https://lambda.ai/service/gpu-cloud)), and kick off the training script:
@@ -215,6 +226,7 @@ I've published a number of guides that might contain helpful information, most r
 │   └── tokenizer.py                # BPE Tokenizer wrapper in style of GPT-4
 ├── pyproject.toml
 ├── runs
+│   ├── compare_2gpu.sh             # Two-GPU distilled-vs-RL evaluation
 │   ├── distill_2gpu.sh             # Two-GPU on-policy distillation
 │   ├── miniseries.sh               # Miniseries training script
 │   ├── runcpu.sh                   # Small example of how to run on CPU/MPS
@@ -224,6 +236,7 @@ I've published a number of guides that might contain helpful information, most r
 │   ├── base_eval.py                # Base model: CORE score, bits per byte, samples
 │   ├── base_train.py               # Base model: train
 │   ├── chat_cli.py                 # Chat model: talk to over CLI
+│   ├── chat_compare.py             # Chat models: compare checkpoints on eval tasks
 │   ├── chat_distill.py             # Chat model: on-policy distillation
 │   ├── chat_eval.py                # Chat model: eval tasks
 │   ├── chat_rl.py                  # Chat model: reinforcement learning
