@@ -47,6 +47,7 @@ from nanochat.distill import (
     on_policy_kl_objective,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
+    teacher_reward_advantages,
 )
 from nanochat.engine import Engine
 from tasks.common import TaskMixture
@@ -114,9 +115,9 @@ parser.add_argument("--device-batch-size", type=int, default=8, help="generation
 parser.add_argument("--loss-batch-size", type=int, default=2, help="rollouts per student forward/backward chunk")
 parser.add_argument(
     "--objective",
-    choices=["rejection", "pg"],
+    choices=["rejection", "pg", "teacher_reward"],
     default="rejection",
-    help="stable teacher-ranked SFT or high-variance on-policy policy gradient",
+    help="teacher-ranked SFT, forward-KL policy gradient, or teacher-likelihood reward",
 )
 parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked samples kept for rejection objective")
 # Generation. These defaults keep the data exactly on-policy.
@@ -468,6 +469,11 @@ for step in range(args.num_steps):
                 student_logprobs,
                 metric_mask,
             )
+        elif args.objective == "teacher_reward":
+            advantages = teacher_reward_advantages(
+                teacher_logprobs,
+                metric_mask,
+            )
         else:
             # Selected samples receive uniform weight; the objective is an
             # ordinary cross-entropy loss on student-generated responses.
@@ -521,7 +527,11 @@ for step in range(args.num_steps):
     mean_reward = sum(prompt_rewards) / max(1, len(prompt_rewards))
     mean_loss = sum(prompt_losses) / max(1, len(prompt_losses))
     mean_response_length = sum(prompt_response_lengths) / max(1, len(prompt_response_lengths))
-    score_label = "advantage" if args.objective == "pg" else "teacher_score"
+    score_label = {
+        "pg": "kl_advantage",
+        "teacher_reward": "teacher_reward",
+        "rejection": "teacher_score",
+    }[args.objective]
     print0(
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.4f} | "

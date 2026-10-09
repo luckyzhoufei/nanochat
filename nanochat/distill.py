@@ -167,6 +167,21 @@ def on_policy_advantages(
     return advantages.masked_fill(~valid, 0.0)
 
 
+def teacher_reward_advantages(
+    teacher_logprobs: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """Center teacher sequence log-probabilities for REINFORCE-style training."""
+    teacher_logprobs = teacher_logprobs.to(dtype=torch.float32)
+    valid = valid.to(device=teacher_logprobs.device, dtype=torch.bool)
+    advantages = teacher_logprobs
+    if bool(valid.any()):
+        advantages = advantages - advantages[valid].mean()
+    else:
+        advantages = torch.zeros_like(advantages)
+    return advantages.masked_fill(~valid, 0.0)
+
+
 def select_teacher_ranked_samples(
     teacher_logprobs: torch.Tensor,
     valid: torch.Tensor,

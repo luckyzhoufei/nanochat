@@ -13,6 +13,7 @@ from nanochat.distill import (
     response_token_mask_from_offsets,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
+    teacher_reward_advantages,
 )
 
 
@@ -146,6 +147,13 @@ def test_on_policy_advantages_use_centered_student_minus_teacher():
     advantages = on_policy_advantages(teacher, student, valid)
     # Raw advantages are [-2, 0], centered to [-1, 1].
     assert torch.allclose(advantages, torch.tensor([-1.0, 1.0, 0.0]))
+
+
+def test_teacher_reward_advantages_are_centered_and_masked():
+    teacher = torch.tensor([-2.0, -1.0, -4.0])
+    valid = torch.tensor([True, True, False])
+    advantages = teacher_reward_advantages(teacher, valid)
+    assert torch.allclose(advantages, torch.tensor([-0.5, 0.5, 0.0]))
 
 
 def test_select_teacher_ranked_samples_keeps_highest_valid_scores():

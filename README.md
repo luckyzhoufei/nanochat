@@ -54,6 +54,15 @@ student-generated tokens. The older `--objective=pg` mode remains available,
 but its high-variance sequence-level policy gradient can cause catastrophic
 forgetting. By default this targets `Qwen/Qwen3.8-27B`.
 
+Cross-tokenizer objectives can be selected explicitly:
+
+- `--objective=teacher_reward`: center the teacher's full-sequence
+  log-probability and use it as a REINFORCE reward.
+- `--objective=pg`: use `student_logprob - teacher_logprob` as the
+  forward-KL policy-gradient advantage.
+- `--objective=rejection`: teacher-rank sampled student responses and train
+  with cross-entropy on the top `--keep-top-k` responses.
+
 Install the optional teacher dependencies and start a single-GPU run:
 
 ```bash
