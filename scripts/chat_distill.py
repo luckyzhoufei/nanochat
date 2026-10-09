@@ -284,6 +284,7 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
     sequences = []
     sampled_masks = []
     teacher_scores = []
+    responses = []
     student.eval()
     num_sampling_passes = math.ceil(args.samples_per_prompt / args.device_batch_size)
     for sampling_idx in range(num_sampling_passes):
@@ -306,6 +307,7 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
         response_ids = sequence[len(prompt_ids):]
         response_mask = sampled_mask[len(prompt_ids):]
         response = tokenizer.decode(response_ids)
+        responses.append(response)
         sampled_ranges = sampled_response_byte_ranges(response_ids, response_mask)
         if not sampled_ranges:
             teacher_scores.append(None)
@@ -320,7 +322,7 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
 
     if device_type == "cuda":
         torch.cuda.empty_cache()
-    return sequences, sampled_masks, teacher_scores
+    return sequences, sampled_masks, teacher_scores, responses
 
 
 def build_student_batch(
@@ -398,6 +400,19 @@ def zero_loss(model: torch.nn.Module) -> torch.Tensor:
     return loss
 
 
+def reduce_sum(value: float) -> float:
+    tensor = torch.tensor(value, dtype=torch.float64, device=device)
+    if ddp:
+        dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+    return tensor.item()
+
+
+def reduce_mean(total: float, count: float) -> float:
+    total = reduce_sum(total)
+    count = reduce_sum(count)
+    return total / count if count > 0 else float("nan")
+
+
 # -----------------------------------------------------------------------------
 # Training loop.
 
@@ -423,8 +438,11 @@ for step in range(args.num_steps):
 
     prompt_rewards = []
     prompt_advantage_stds = []
+    prompt_teacher_score_stds = []
     prompt_losses = []
     prompt_response_lengths = []
+    step_responses = []
+    step_selected_responses = []
     step_candidate_count = 0
     step_teacher_valid_count = 0
     step_metric_count = 0
@@ -434,11 +452,12 @@ for step in range(args.num_steps):
         # This keeps teacher sequence lengths and per-step work closer together.
         dataset_index = (step * args.prompts_per_step + prompt_idx) % len(train_dataset)
         conversation = train_dataset[dataset_index]
-        sequences, sampled_masks, teacher_scores = sample_and_score(
+        sequences, sampled_masks, teacher_scores, responses = sample_and_score(
             conversation,
             step,
             prompt_idx,
         )
+        step_responses.extend(responses)
         inputs, targets, teacher_logprobs, teacher_valid = build_student_batch(
             sequences,
             sampled_masks,
@@ -494,6 +513,11 @@ for step in range(args.num_steps):
         step_teacher_valid_count += int(teacher_valid.sum().item())
         step_metric_count += int(metric_mask.sum().item())
         step_metric_token_count += int(num_valid_tokens.item())
+        selected_indices = metric_mask.nonzero(as_tuple=False).squeeze(1)
+        step_selected_responses.extend(responses[i] for i in selected_indices.tolist())
+        valid_teacher_scores = teacher_logprobs[teacher_valid]
+        if valid_teacher_scores.numel() > 1:
+            prompt_teacher_score_stds.append(valid_teacher_scores.std(unbiased=False).item())
         if bool(metric_mask.any()):
             prompt_teacher_logprob = teacher_logprobs[metric_mask].mean().item()
             prompt_student_logprob = student_logprobs[metric_mask].mean().item()
@@ -541,20 +565,55 @@ for step in range(args.num_steps):
     step_time = time.time() - step_start
     total_training_time += step_time
 
-    if valid_sequence_count > 0:
-        mean_teacher_logprob = teacher_logprob_sum / valid_sequence_count
-        mean_student_logprob = student_logprob_sum / valid_sequence_count
-    else:
-        mean_teacher_logprob = float("nan")
-        mean_student_logprob = float("nan")
-    mean_reward = sum(prompt_rewards) / len(prompt_rewards) if prompt_rewards else float("nan")
-    mean_advantage_std = (
-        sum(prompt_advantage_stds) / len(prompt_advantage_stds)
-        if prompt_advantage_stds
-        else float("nan")
+    mean_teacher_logprob = reduce_mean(teacher_logprob_sum, valid_sequence_count)
+    mean_student_logprob = reduce_mean(student_logprob_sum, valid_sequence_count)
+    mean_reward = reduce_mean(sum(prompt_rewards), len(prompt_rewards))
+    mean_advantage_std = reduce_mean(
+        sum(prompt_advantage_stds),
+        len(prompt_advantage_stds),
     )
-    mean_loss = sum(prompt_losses) / max(1, len(prompt_losses))
-    mean_response_length = sum(prompt_response_lengths) / max(1, len(prompt_response_lengths))
+    mean_teacher_score_std = reduce_mean(
+        sum(prompt_teacher_score_stds),
+        len(prompt_teacher_score_stds),
+    )
+    mean_loss = reduce_mean(sum(prompt_losses), len(prompt_losses))
+    step_candidate_count = int(reduce_sum(step_candidate_count))
+    step_teacher_valid_count = int(reduce_sum(step_teacher_valid_count))
+    step_metric_count = int(reduce_sum(step_metric_count))
+    step_metric_token_count = int(reduce_sum(step_metric_token_count))
+    mean_response_length = reduce_mean(
+        sum(prompt_response_lengths),
+        len(prompt_response_lengths),
+    )
+
+    if ddp:
+        gathered_responses = [None] * ddp_world_size
+        dist.all_gather_object(
+            gathered_responses,
+            (step_responses, step_selected_responses),
+        )
+        all_responses = [
+            response
+            for responses, _ in gathered_responses
+            for response in responses
+        ]
+        all_selected_responses = [
+            response
+            for _, responses in gathered_responses
+            for response in responses
+        ]
+    else:
+        all_responses = step_responses
+        all_selected_responses = step_selected_responses
+    unique_responses = len(set(all_responses))
+    unique_responses_ratio = unique_responses / max(1, len(all_responses))
+    unique_selected_responses = len(set(all_selected_responses))
+    unique_selected_ratio = unique_selected_responses / max(1, len(all_selected_responses))
+
+    if len(all_responses) > 1 and unique_responses == 1:
+        print0("WARNING: mode collapse detected: all sampled responses are identical")
+    if mean_advantage_std == 0.0 and valid_sequence_count > 0:
+        print0("WARNING: zero advantage variance; this step has no learning signal")
     score_label = {
         "pg": "kl_advantage",
         "teacher_reward": "teacher_reward",
@@ -562,10 +621,13 @@ for step in range(args.num_steps):
     }[args.objective]
     print0(
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
-        f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.4f} | "
+        f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.6e} | "
         f"{score_label}: {mean_reward:.5f} | adv_std: {mean_advantage_std:.5f} | "
+        f"teacher_std: {mean_teacher_score_std:.5f} | "
         f"valid_seq: {step_metric_count}/{step_teacher_valid_count}/{step_candidate_count} | "
         f"valid_tokens: {step_metric_token_count} | "
+        f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
+        f"selected_unique: {unique_selected_responses}/{len(all_selected_responses)} | "
         f"response_len: {mean_response_length:.1f} | "
         f"lrm: {lrm:.3f} | dt: {step_time * 1000:.0f}ms"
     )
@@ -576,9 +638,15 @@ for step in range(args.num_steps):
         "train/student_logprob": mean_student_logprob,
         "train/objective_score": mean_reward,
         "train/advantage_std": mean_advantage_std,
+        "train/teacher_score_std": mean_teacher_score_std,
         "train/candidate_sequences": step_candidate_count,
         "train/teacher_valid_sequences": step_teacher_valid_count,
         "train/selected_sequences": step_metric_count,
+        "train/valid_tokens": step_metric_token_count,
+        "train/unique_responses": unique_responses,
+        "train/unique_responses_ratio": unique_responses_ratio,
+        "train/unique_selected_responses": unique_selected_responses,
+        "train/unique_selected_ratio": unique_selected_ratio,
         "train/response_length": mean_response_length,
         "train/lrm": lrm,
         "train/dt": step_time,

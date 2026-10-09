@@ -63,6 +63,10 @@ Cross-tokenizer objectives can be selected explicitly:
 - `--objective=rejection`: teacher-rank sampled student responses and train
   with cross-entropy on the top `--keep-top-k` responses.
 
+Training logs include `unique`, `selected_unique`, `teacher_std`, `adv_std`,
+`student_logp`, and `response_len`. A collapse is indicated by
+`unique=1/8`, `teacher_std=0`, `adv_std=0`, and a near-zero `student_logp`.
+
 Install the optional teacher dependencies and start a single-GPU run:
 
 ```bash
