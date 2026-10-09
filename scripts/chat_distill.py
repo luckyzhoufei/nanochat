@@ -418,6 +418,7 @@ for step in range(args.num_steps):
     optimizer.zero_grad(set_to_none=True)
 
     prompt_rewards = []
+    prompt_advantage_stds = []
     prompt_losses = []
     prompt_response_lengths = []
     for prompt_idx in range(args.prompts_per_step):
@@ -484,11 +485,17 @@ for step in range(args.num_steps):
         if bool(metric_mask.any()):
             prompt_teacher_logprob = teacher_logprobs[metric_mask].mean().item()
             prompt_student_logprob = student_logprobs[metric_mask].mean().item()
-            prompt_advantages = advantages[metric_mask]
             teacher_logprob_sum += prompt_teacher_logprob * int(num_valid_sequences.item())
             student_logprob_sum += prompt_student_logprob * int(num_valid_sequences.item())
             valid_sequence_count += int(num_valid_sequences.item())
-            prompt_rewards.append(prompt_advantages.mean().item())
+            if args.objective == "pg":
+                prompt_score = prompt_student_logprob - prompt_teacher_logprob
+            else:
+                # Advantages are centered within each prompt, so their mean is
+                # zero by construction. Log the raw teacher score instead.
+                prompt_score = prompt_teacher_logprob
+            prompt_rewards.append(prompt_score)
+            prompt_advantage_stds.append(advantages[metric_mask].std(unbiased=False).item())
 
         if bool(metric_mask.any()):
             # A second chunked pass accumulates gradients. This avoids holding
@@ -525,6 +532,7 @@ for step in range(args.num_steps):
     mean_teacher_logprob = teacher_logprob_sum / max(1, valid_sequence_count)
     mean_student_logprob = student_logprob_sum / max(1, valid_sequence_count)
     mean_reward = sum(prompt_rewards) / max(1, len(prompt_rewards))
+    mean_advantage_std = sum(prompt_advantage_stds) / max(1, len(prompt_advantage_stds))
     mean_loss = sum(prompt_losses) / max(1, len(prompt_losses))
     mean_response_length = sum(prompt_response_lengths) / max(1, len(prompt_response_lengths))
     score_label = {
@@ -535,7 +543,8 @@ for step in range(args.num_steps):
     print0(
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.4f} | "
-        f"{score_label}: {mean_reward:.5f} | response_len: {mean_response_length:.1f} | "
+        f"{score_label}: {mean_reward:.5f} | adv_std: {mean_advantage_std:.5f} | "
+        f"response_len: {mean_response_length:.1f} | "
         f"lrm: {lrm:.3f} | dt: {step_time * 1000:.0f}ms"
     )
     wandb_run.log({
@@ -544,6 +553,7 @@ for step in range(args.num_steps):
         "train/teacher_logprob": mean_teacher_logprob,
         "train/student_logprob": mean_student_logprob,
         "train/objective_score": mean_reward,
+        "train/advantage_std": mean_advantage_std,
         "train/response_length": mean_response_length,
         "train/lrm": lrm,
         "train/dt": step_time,
