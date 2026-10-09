@@ -355,6 +355,10 @@ def build_student_batch(
         dtype=torch.float32,
         device=device,
     )
+    # A teacher score is only useful if the same response also has at least
+    # one student target after applying Engine's sampled/forced-token mask.
+    student_trainable = (targets >= 0).any(dim=1)
+    teacher_valid = teacher_valid & student_trainable
     return inputs, targets, teacher_logprobs, teacher_valid
 
 
@@ -421,6 +425,10 @@ for step in range(args.num_steps):
     prompt_advantage_stds = []
     prompt_losses = []
     prompt_response_lengths = []
+    step_candidate_count = 0
+    step_teacher_valid_count = 0
+    step_metric_count = 0
+    step_metric_token_count = 0
     for prompt_idx in range(args.prompts_per_step):
         # Both ranks consume the same prompt but sample different responses.
         # This keeps teacher sequence lengths and per-step work closer together.
@@ -482,6 +490,10 @@ for step in range(args.num_steps):
 
         num_valid_tokens = (targets >= 0).sum().clamp_min(1)
         num_valid_sequences = metric_mask.sum()
+        step_candidate_count += len(teacher_scores)
+        step_teacher_valid_count += int(teacher_valid.sum().item())
+        step_metric_count += int(metric_mask.sum().item())
+        step_metric_token_count += int(num_valid_tokens.item())
         if bool(metric_mask.any()):
             prompt_teacher_logprob = teacher_logprobs[metric_mask].mean().item()
             prompt_student_logprob = student_logprobs[metric_mask].mean().item()
@@ -529,10 +541,18 @@ for step in range(args.num_steps):
     step_time = time.time() - step_start
     total_training_time += step_time
 
-    mean_teacher_logprob = teacher_logprob_sum / max(1, valid_sequence_count)
-    mean_student_logprob = student_logprob_sum / max(1, valid_sequence_count)
-    mean_reward = sum(prompt_rewards) / max(1, len(prompt_rewards))
-    mean_advantage_std = sum(prompt_advantage_stds) / max(1, len(prompt_advantage_stds))
+    if valid_sequence_count > 0:
+        mean_teacher_logprob = teacher_logprob_sum / valid_sequence_count
+        mean_student_logprob = student_logprob_sum / valid_sequence_count
+    else:
+        mean_teacher_logprob = float("nan")
+        mean_student_logprob = float("nan")
+    mean_reward = sum(prompt_rewards) / len(prompt_rewards) if prompt_rewards else float("nan")
+    mean_advantage_std = (
+        sum(prompt_advantage_stds) / len(prompt_advantage_stds)
+        if prompt_advantage_stds
+        else float("nan")
+    )
     mean_loss = sum(prompt_losses) / max(1, len(prompt_losses))
     mean_response_length = sum(prompt_response_lengths) / max(1, len(prompt_response_lengths))
     score_label = {
@@ -544,6 +564,8 @@ for step in range(args.num_steps):
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.4f} | "
         f"{score_label}: {mean_reward:.5f} | adv_std: {mean_advantage_std:.5f} | "
+        f"valid_seq: {step_metric_count}/{step_teacher_valid_count}/{step_candidate_count} | "
+        f"valid_tokens: {step_metric_token_count} | "
         f"response_len: {mean_response_length:.1f} | "
         f"lrm: {lrm:.3f} | dt: {step_time * 1000:.0f}ms"
     )
@@ -554,6 +576,9 @@ for step in range(args.num_steps):
         "train/student_logprob": mean_student_logprob,
         "train/objective_score": mean_reward,
         "train/advantage_std": mean_advantage_std,
+        "train/candidate_sequences": step_candidate_count,
+        "train/teacher_valid_sequences": step_teacher_valid_count,
+        "train/selected_sequences": step_metric_count,
         "train/response_length": mean_response_length,
         "train/lrm": lrm,
         "train/dt": step_time,
