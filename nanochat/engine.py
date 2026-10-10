@@ -274,28 +274,34 @@ class Engine:
             ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
             logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
 
-    def generate_batch(self, tokens, num_samples=1, **kwargs):
+    def generate_batch(self, tokens, num_samples=1, return_termination=False, **kwargs):
         """
         Non-streaming batch generation that just returns the final token sequences.
         Returns a list of token sequences (list of lists of ints).
         Terminal tokens (assistant_end, bos) are not included in the results.
+        If return_termination=True, also returns the terminal token sampled for
+        each row, or None when generation stopped because of max_tokens.
         """
         assistant_end = self.tokenizer.encode_special("<|assistant_end|>")
         bos = self.tokenizer.get_bos_token_id()
         results = [tokens.copy() for _ in range(num_samples)]
         masks = [[0] * len(tokens) for _ in range(num_samples)]
         completed = [False] * num_samples
+        termination_tokens = [None] * num_samples
         for token_column, token_masks in self.generate(tokens, num_samples, **kwargs):
             for i, (token, mask) in enumerate(zip(token_column, token_masks)):
                 if not completed[i]:
                     if token == assistant_end or token == bos:
                         completed[i] = True
+                        termination_tokens[i] = token
                     else:
                         results[i].append(token)
                         masks[i].append(mask)
             # Stop if all rows are completed
             if all(completed):
                 break
+        if return_termination:
+            return results, masks, termination_tokens
         return results, masks
 
 

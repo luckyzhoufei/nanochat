@@ -124,6 +124,12 @@ parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked sa
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
 parser.add_argument("--temperature", type=float, default=1.0, help="student sampling temperature")
 parser.add_argument("--top-k", type=int, default=0, help="student top-k sampling (0 = full distribution)")
+parser.add_argument(
+    "--eos-on-max-tokens",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="train an assistant_end target even when generation hits max-new-tokens",
+)
 # Optimization.
 parser.add_argument("--embedding-lr", type=float, default=0.2, help="learning rate for embedding parameters")
 parser.add_argument("--unembedding-lr", type=float, default=0.004, help="learning rate for unembedding parameters")
@@ -283,6 +289,7 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
 
     sequences = []
     sampled_masks = []
+    termination_tokens = []
     teacher_scores = []
     responses = []
     student.eval()
@@ -292,16 +299,18 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
             args.device_batch_size,
             args.samples_per_prompt - sampling_idx * args.device_batch_size,
         )
-        generated, masks = engine.generate_batch(
+        generated, masks, terminations = engine.generate_batch(
             prompt_ids,
             num_samples=batch_size,
             max_tokens=max_new_tokens,
             temperature=args.temperature,
             top_k=args.top_k,
             seed=next_seed(step, prompt_idx, sampling_idx),
+            return_termination=True,
         )
         sequences.extend(generated)
         sampled_masks.extend(masks)
+        termination_tokens.extend(terminations)
 
     for sequence, sampled_mask in zip(sequences, sampled_masks):
         response_ids = sequence[len(prompt_ids):]
@@ -322,16 +331,29 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
 
     if device_type == "cuda":
         torch.cuda.empty_cache()
-    return sequences, sampled_masks, teacher_scores, responses
+    return sequences, sampled_masks, termination_tokens, teacher_scores, responses
 
 
 def build_student_batch(
     sequences: list[list[int]],
     sampled_masks: list[list[int]],
+    termination_tokens: list[int | None],
     teacher_scores: list,
+    eos_on_max_tokens: bool,
 ):
     """Pad rollouts and build teacher/student sequence-level scores."""
     assistant_end = tokenizer.encode_special("<|assistant_end|>")
+    sequences = [sequence.copy() for sequence in sequences]
+    sampled_masks = [mask.copy() for mask in sampled_masks]
+    for i, terminal_token in enumerate(termination_tokens):
+        if terminal_token is not None:
+            sequences[i].append(terminal_token)
+            sampled_masks[i].append(1)
+        elif eos_on_max_tokens:
+            # A truncated trajectory has no observed stop token. Supervise the
+            # stop position explicitly so the student learns to terminate.
+            sequences[i].append(assistant_end)
+            sampled_masks[i].append(1)
     max_length = max(len(sequence) for sequence in sequences)
     padded_sequences = [
         sequence + [assistant_end] * (max_length - len(sequence))
@@ -447,21 +469,25 @@ for step in range(args.num_steps):
     step_teacher_valid_count = 0
     step_metric_count = 0
     step_metric_token_count = 0
+    step_terminated_count = 0
     for prompt_idx in range(args.prompts_per_step):
         # Both ranks consume the same prompt but sample different responses.
         # This keeps teacher sequence lengths and per-step work closer together.
         dataset_index = (step * args.prompts_per_step + prompt_idx) % len(train_dataset)
         conversation = train_dataset[dataset_index]
-        sequences, sampled_masks, teacher_scores, responses = sample_and_score(
+        sequences, sampled_masks, termination_tokens, teacher_scores, responses = sample_and_score(
             conversation,
             step,
             prompt_idx,
         )
         step_responses.extend(responses)
+        step_terminated_count += sum(token is not None for token in termination_tokens)
         inputs, targets, teacher_logprobs, teacher_valid = build_student_batch(
             sequences,
             sampled_masks,
+            termination_tokens,
             teacher_scores,
+            args.eos_on_max_tokens,
         )
         if args.objective == "rejection":
             selected = select_teacher_ranked_samples(
@@ -581,6 +607,7 @@ for step in range(args.num_steps):
     step_teacher_valid_count = int(reduce_sum(step_teacher_valid_count))
     step_metric_count = int(reduce_sum(step_metric_count))
     step_metric_token_count = int(reduce_sum(step_metric_token_count))
+    step_terminated_count = int(reduce_sum(step_terminated_count))
     mean_response_length = reduce_mean(
         sum(prompt_response_lengths),
         len(prompt_response_lengths),
@@ -626,6 +653,7 @@ for step in range(args.num_steps):
         f"teacher_std: {mean_teacher_score_std:.5f} | "
         f"valid_seq: {step_metric_count}/{step_teacher_valid_count}/{step_candidate_count} | "
         f"valid_tokens: {step_metric_token_count} | "
+        f"terminated: {step_terminated_count}/{step_candidate_count} | "
         f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
         f"selected_unique: {unique_selected_responses}/{len(all_selected_responses)} | "
         f"response_len: {mean_response_length:.1f} | "
@@ -643,6 +671,7 @@ for step in range(args.num_steps):
         "train/teacher_valid_sequences": step_teacher_valid_count,
         "train/selected_sequences": step_metric_count,
         "train/valid_tokens": step_metric_token_count,
+        "train/terminated_sequences": step_terminated_count,
         "train/unique_responses": unique_responses,
         "train/unique_responses_ratio": unique_responses_ratio,
         "train/unique_selected_responses": unique_selected_responses,

@@ -66,6 +66,10 @@ Cross-tokenizer objectives can be selected explicitly:
 Training logs include `unique`, `selected_unique`, `teacher_std`, `adv_std`,
 `student_logp`, and `response_len`. A collapse is indicated by
 `unique=1/8`, `teacher_std=0`, `adv_std=0`, and a near-zero `student_logp`.
+Distillation also trains the sampled assistant termination token, preventing
+runaway generations that always hit `--max-new-tokens`. By default,
+`--eos-on-max-tokens` also supervises `<|assistant_end|>` at the truncation
+boundary; disable it with `--no-eos-on-max-tokens`.
 
 Install the optional teacher dependencies and start a single-GPU run:
 

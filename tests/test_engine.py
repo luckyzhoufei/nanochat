@@ -246,6 +246,28 @@ def test_num_samples_count():
         assert len(results) == num_samples, f"Expected {num_samples} sequences from {num_samples} samples, got {len(results)}"
 
 
+def test_generate_batch_can_return_termination_tokens():
+    model = MockModel()
+    tokenizer = ByteTokenizer()
+    engine = Engine(model, tokenizer)
+    prompt = [261, 72, 101, 108, 108, 111]
+
+    def fake_generate(*args, **kwargs):
+        yield [260], [1]  # <|assistant_end|>
+
+    engine.generate = fake_generate
+    results, masks, terminations = engine.generate_batch(
+        prompt,
+        return_termination=True,
+    )
+    assert results == [prompt]
+    assert masks == [[0] * len(prompt)]
+    assert terminations == [260]
+
+    results_without_terminations, _ = engine.generate_batch(prompt)
+    assert results_without_terminations == [prompt]
+
+
 def test_different_seeds_introduce_variation_when_temperature_nonzero():
     """With temperature > 0, different seeds should introduce sampling variation."""
     model = MockModel()
