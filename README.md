@@ -71,6 +71,10 @@ runaway generations that always hit `--max-new-tokens`. By default,
 `--eos-on-max-tokens` also supervises `<|assistant_end|>` at the truncation
 boundary; disable it with `--no-eos-on-max-tokens`.
 
+Use `--log-samples-every=50` to print the student prompt and selected responses
+periodically. `--log-samples-count` controls how many responses are printed and
+`--log-samples-chars` limits the length of each log entry.
+
 Install the optional teacher dependencies and start a single-GPU run:
 
 ```bash

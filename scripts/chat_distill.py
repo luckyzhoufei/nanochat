@@ -147,6 +147,9 @@ parser.add_argument("--mmlu-epochs", type=int, default=1, help="MMLU copies in t
 parser.add_argument("--gsm8k-epochs", type=int, default=1, help="GSM8K copies in the prompt mixture")
 # Checkpointing.
 parser.add_argument("--save-every", type=int, default=50, help="save a checkpoint every N steps")
+parser.add_argument("--log-samples-every", type=int, default=50, help="print generated samples every N steps (0 = disable)")
+parser.add_argument("--log-samples-count", type=int, default=2, help="number of student responses to print")
+parser.add_argument("--log-samples-chars", type=int, default=1000, help="maximum characters per printed prompt/response")
 parser.add_argument("--seed", type=int, default=42, help="sampling seed")
 args = parser.parse_args()
 
@@ -170,6 +173,12 @@ if args.teacher_max_seq_len <= 0:
     parser.error("--teacher-max-seq-len must be positive")
 if args.save_every <= 0:
     parser.error("--save-every must be positive")
+if args.log_samples_every < 0:
+    parser.error("--log-samples-every must be non-negative")
+if args.log_samples_count <= 0:
+    parser.error("--log-samples-count must be positive")
+if args.log_samples_chars <= 0:
+    parser.error("--log-samples-chars must be positive")
 if not 0.0 <= args.warmup_ratio < 1.0:
     parser.error("--warmup-ratio must be in [0, 1)")
 if args.temperature != 1.0 or args.top_k != 0:
@@ -331,7 +340,16 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
 
     if device_type == "cuda":
         torch.cuda.empty_cache()
-    return sequences, sampled_masks, termination_tokens, teacher_scores, responses
+    prompt_text = tokenizer.decode(prompt_ids)
+    return (
+        sequences,
+        sampled_masks,
+        termination_tokens,
+        teacher_scores,
+        responses,
+        prompt_text,
+        len(prompt_ids),
+    )
 
 
 def build_student_batch(
@@ -435,6 +453,12 @@ def reduce_mean(total: float, count: float) -> float:
     return total / count if count > 0 else float("nan")
 
 
+def clip_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n... [truncated, {len(text) - max_chars} chars omitted]"
+
+
 # -----------------------------------------------------------------------------
 # Training loop.
 
@@ -475,7 +499,15 @@ for step in range(args.num_steps):
         # This keeps teacher sequence lengths and per-step work closer together.
         dataset_index = (step * args.prompts_per_step + prompt_idx) % len(train_dataset)
         conversation = train_dataset[dataset_index]
-        sequences, sampled_masks, termination_tokens, teacher_scores, responses = sample_and_score(
+        (
+            sequences,
+            sampled_masks,
+            termination_tokens,
+            teacher_scores,
+            responses,
+            prompt_text,
+            prompt_token_length,
+        ) = sample_and_score(
             conversation,
             step,
             prompt_idx,
@@ -499,6 +531,28 @@ for step in range(args.num_steps):
         else:
             selected = teacher_valid
             metric_mask = teacher_valid
+
+        should_log_samples = (
+            args.log_samples_every > 0
+            and step % args.log_samples_every == 0
+        )
+        if should_log_samples:
+            print0(
+                f"\n===== distillation sample | step {step + 1} | "
+                f"prompt {prompt_idx + 1}/{args.prompts_per_step} ====="
+            )
+            print0(f"PROMPT:\n{clip_text(prompt_text, args.log_samples_chars)}")
+            for response_idx in range(min(args.log_samples_count, len(responses))):
+                teacher_score = teacher_scores[response_idx]
+                score_text = "none" if teacher_score is None else f"{teacher_score.logprob:.5f}"
+                selected_text = bool(metric_mask[response_idx].item())
+                response_tokens = len(sequences[response_idx]) - prompt_token_length
+                print0(
+                    f"RESPONSE {response_idx + 1} | teacher_logp: {score_text} | "
+                    f"selected: {selected_text} | response_tokens: {response_tokens} | "
+                    f"terminated: {termination_tokens[response_idx] is not None}"
+                )
+                print0(clip_text(responses[response_idx], args.log_samples_chars))
 
         # Invalid or unselected rows must not contribute to the student objective.
         targets = targets.masked_fill(~metric_mask.unsqueeze(1), -1)
