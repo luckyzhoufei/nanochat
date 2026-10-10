@@ -10,7 +10,9 @@ from nanochat.distill import (
     fit_prompt_to_context,
     on_policy_advantages,
     on_policy_kl_objective,
+    quality_adjusted_scores,
     response_token_mask_from_offsets,
+    response_repetition_rate,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
     teacher_reward_advantages,
@@ -168,6 +170,28 @@ def test_select_teacher_ranked_samples_handles_fewer_valid_than_k():
     valid = torch.tensor([False, True])
     selected = select_teacher_ranked_samples(teacher_logprobs, valid, keep_top_k=2)
     assert selected.tolist() == [False, True]
+
+
+def test_response_repetition_rate_detects_collapse():
+    assert response_repetition_rate([1] * 100) > 0.95
+    assert response_repetition_rate([1, 2, 3, 4, 5]) == 0.0
+
+
+def test_quality_adjusted_scores_penalize_repetition_and_truncation():
+    teacher = torch.tensor([-0.1, -1.0])
+    lengths = torch.tensor([512.0, 100.0])
+    repetition = torch.tensor([1.0, 0.0])
+    truncated = torch.tensor([1.0, 0.0])
+    scores = quality_adjusted_scores(
+        teacher,
+        lengths,
+        repetition,
+        truncated,
+        length_penalty=0.0002,
+        repetition_penalty=2.0,
+        truncation_penalty=5.0,
+    )
+    assert torch.allclose(scores, torch.tensor([-7.2024, -1.02]))
 
 
 def test_on_policy_kl_objective_has_expected_gradient():

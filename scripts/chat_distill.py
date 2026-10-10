@@ -45,6 +45,8 @@ from nanochat.distill import (
     fit_prompt_to_context,
     on_policy_advantages,
     on_policy_kl_objective,
+    quality_adjusted_scores,
+    response_repetition_rate,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
     teacher_reward_advantages,
@@ -120,6 +122,15 @@ parser.add_argument(
     help="teacher-ranked SFT, forward-KL policy gradient, or teacher-likelihood reward",
 )
 parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked samples kept for rejection objective")
+parser.add_argument("--length-penalty", type=float, default=0.0002, help="quality penalty per generated token")
+parser.add_argument("--repetition-penalty", type=float, default=2.0, help="quality penalty multiplier for repeated n-grams")
+parser.add_argument("--truncation-penalty", type=float, default=5.0, help="quality penalty for unfinished responses")
+parser.add_argument(
+    "--max-repeat-ngram-rate",
+    type=float,
+    default=0.8,
+    help="reject responses whose repeated 3-gram fraction exceeds this value",
+)
 # Generation. These defaults keep the data exactly on-policy.
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
 parser.add_argument("--temperature", type=float, default=1.0, help="student sampling temperature")
@@ -167,6 +178,10 @@ if args.loss_batch_size <= 0:
     parser.error("--loss-batch-size must be positive")
 if args.keep_top_k <= 0:
     parser.error("--keep-top-k must be positive")
+if args.length_penalty < 0 or args.repetition_penalty < 0 or args.truncation_penalty < 0:
+    parser.error("quality penalties must be non-negative")
+if not 0.0 <= args.max_repeat_ngram_rate <= 1.0:
+    parser.error("--max-repeat-ngram-rate must be in [0, 1]")
 if args.max_new_tokens <= 0:
     parser.error("--max-new-tokens must be positive")
 if args.teacher_max_seq_len <= 0:
@@ -491,6 +506,7 @@ for step in range(args.num_steps):
     step_selected_responses = []
     step_candidate_count = 0
     step_teacher_valid_count = 0
+    step_quality_valid_count = 0
     step_metric_count = 0
     step_metric_token_count = 0
     step_terminated_count = 0
@@ -514,6 +530,23 @@ for step in range(args.num_steps):
         )
         step_responses.extend(responses)
         step_terminated_count += sum(token is not None for token in termination_tokens)
+        response_lengths = [
+            len(sequence) - prompt_token_length
+            for sequence in sequences
+        ]
+        repetition_rates = torch.tensor(
+            [
+                response_repetition_rate(sequence[prompt_token_length:])
+                for sequence in sequences
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        truncated = torch.tensor(
+            [token is None for token in termination_tokens],
+            dtype=torch.float32,
+            device=device,
+        )
         inputs, targets, teacher_logprobs, teacher_valid = build_student_batch(
             sequences,
             sampled_masks,
@@ -521,16 +554,26 @@ for step in range(args.num_steps):
             teacher_scores,
             args.eos_on_max_tokens,
         )
+        quality_scores = quality_adjusted_scores(
+            teacher_logprobs,
+            torch.tensor(response_lengths, dtype=torch.float32, device=device),
+            repetition_rates,
+            truncated,
+            length_penalty=args.length_penalty,
+            repetition_penalty=args.repetition_penalty,
+            truncation_penalty=args.truncation_penalty,
+        )
+        quality_valid = teacher_valid & (repetition_rates <= args.max_repeat_ngram_rate)
         if args.objective == "rejection":
             selected = select_teacher_ranked_samples(
-                teacher_logprobs,
-                teacher_valid,
+                quality_scores,
+                quality_valid,
                 args.keep_top_k,
             )
-            metric_mask = teacher_valid & selected
+            metric_mask = quality_valid & selected
         else:
-            selected = teacher_valid
-            metric_mask = teacher_valid
+            selected = quality_valid
+            metric_mask = quality_valid
 
         should_log_samples = (
             args.log_samples_every > 0
@@ -549,6 +592,8 @@ for step in range(args.num_steps):
                 response_tokens = len(sequences[response_idx]) - prompt_token_length
                 print0(
                     f"RESPONSE {response_idx + 1} | teacher_logp: {score_text} | "
+                    f"quality_score: {quality_scores[response_idx].item():.5f} | "
+                    f"repeat_rate: {repetition_rates[response_idx].item():.3f} | "
                     f"selected: {selected_text} | response_tokens: {response_tokens} | "
                     f"terminated: {termination_tokens[response_idx] is not None}"
                 )
@@ -591,6 +636,7 @@ for step in range(args.num_steps):
         num_valid_sequences = metric_mask.sum()
         step_candidate_count += len(teacher_scores)
         step_teacher_valid_count += int(teacher_valid.sum().item())
+        step_quality_valid_count += int(quality_valid.sum().item())
         step_metric_count += int(metric_mask.sum().item())
         step_metric_token_count += int(num_valid_tokens.item())
         selected_indices = metric_mask.nonzero(as_tuple=False).squeeze(1)
@@ -634,7 +680,7 @@ for step in range(args.num_steps):
         else:
             zero_loss(student).backward()
 
-        prompt_response_lengths.extend(len(sequence) for sequence in sequences)
+        prompt_response_lengths.extend(response_lengths)
 
     lrm = get_lr_multiplier(step)
     for group in optimizer.param_groups:
@@ -659,6 +705,7 @@ for step in range(args.num_steps):
     mean_loss = reduce_mean(sum(prompt_losses), len(prompt_losses))
     step_candidate_count = int(reduce_sum(step_candidate_count))
     step_teacher_valid_count = int(reduce_sum(step_teacher_valid_count))
+    step_quality_valid_count = int(reduce_sum(step_quality_valid_count))
     step_metric_count = int(reduce_sum(step_metric_count))
     step_metric_token_count = int(reduce_sum(step_metric_token_count))
     step_terminated_count = int(reduce_sum(step_terminated_count))
@@ -705,7 +752,7 @@ for step in range(args.num_steps):
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.6e} | "
         f"{score_label}: {mean_reward:.5f} | adv_std: {mean_advantage_std:.5f} | "
         f"teacher_std: {mean_teacher_score_std:.5f} | "
-        f"valid_seq: {step_metric_count}/{step_teacher_valid_count}/{step_candidate_count} | "
+        f"valid_seq: {step_metric_count}/{step_quality_valid_count}/{step_teacher_valid_count}/{step_candidate_count} | "
         f"valid_tokens: {step_metric_token_count} | "
         f"terminated: {step_terminated_count}/{step_candidate_count} | "
         f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
@@ -723,6 +770,7 @@ for step in range(args.num_steps):
         "train/teacher_score_std": mean_teacher_score_std,
         "train/candidate_sequences": step_candidate_count,
         "train/teacher_valid_sequences": step_teacher_valid_count,
+        "train/quality_valid_sequences": step_quality_valid_count,
         "train/selected_sequences": step_metric_count,
         "train/valid_tokens": step_metric_token_count,
         "train/terminated_sequences": step_terminated_count,

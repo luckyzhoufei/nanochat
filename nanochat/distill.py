@@ -201,6 +201,41 @@ def select_teacher_ranked_samples(
     return selected
 
 
+def response_repetition_rate(
+    token_ids: list[int],
+    ngram_size: int = 3,
+) -> float:
+    """Return the fraction of repeated n-grams in a response."""
+    if ngram_size <= 0:
+        raise ValueError("ngram_size must be positive")
+    num_ngrams = len(token_ids) - ngram_size + 1
+    if num_ngrams <= 1:
+        return 0.0
+    ngrams = [
+        tuple(token_ids[i:i + ngram_size])
+        for i in range(num_ngrams)
+    ]
+    return 1.0 - len(set(ngrams)) / len(ngrams)
+
+
+def quality_adjusted_scores(
+    teacher_logprobs: torch.Tensor,
+    response_lengths: torch.Tensor,
+    repetition_rates: torch.Tensor,
+    truncated: torch.Tensor,
+    length_penalty: float,
+    repetition_penalty: float,
+    truncation_penalty: float,
+) -> torch.Tensor:
+    """Apply response-quality penalties before teacher-ranked selection."""
+    return (
+        teacher_logprobs
+        - length_penalty * response_lengths
+        - repetition_penalty * repetition_rates
+        - truncation_penalty * truncated.to(dtype=teacher_logprobs.dtype)
+    )
+
+
 def on_policy_kl_objective(
     token_logprobs: torch.Tensor,
     targets: torch.Tensor,
