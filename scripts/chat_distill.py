@@ -28,6 +28,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 import wandb
 
 from nanochat.checkpoint_manager import load_model, save_checkpoint
@@ -43,10 +44,12 @@ from nanochat.distill import (
     QwenTeacher,
     conversation_to_teacher_prompt,
     fit_prompt_to_context,
+    mmlu_reference_letter,
     on_policy_advantages,
     on_policy_kl_objective,
     quality_adjusted_scores,
     response_repetition_rate,
+    task_correctness_reward,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
     teacher_reward_advantages,
@@ -131,6 +134,14 @@ parser.add_argument(
     default=0.8,
     help="reject responses whose repeated 3-gram fraction exceeds this value",
 )
+parser.add_argument("--mmlu-reward-weight", type=float, default=1.0, help="reward for the correct MMLU letter")
+parser.add_argument("--gsm8k-reward-weight", type=float, default=1.0, help="reward for the correct GSM8K answer")
+parser.add_argument(
+    "--mmlu-logit-loss-weight",
+    type=float,
+    default=1.0,
+    help="weight for direct supervision of assistant-start MMLU logits",
+)
 # Generation. These defaults keep the data exactly on-policy.
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
 parser.add_argument("--temperature", type=float, default=1.0, help="student sampling temperature")
@@ -182,6 +193,8 @@ if args.length_penalty < 0 or args.repetition_penalty < 0 or args.truncation_pen
     parser.error("quality penalties must be non-negative")
 if not 0.0 <= args.max_repeat_ngram_rate <= 1.0:
     parser.error("--max-repeat-ngram-rate must be in [0, 1]")
+if args.mmlu_reward_weight < 0 or args.gsm8k_reward_weight < 0 or args.mmlu_logit_loss_weight < 0:
+    parser.error("task reward and logit loss weights must be non-negative")
 if args.max_new_tokens <= 0:
     parser.error("--max-new-tokens must be positive")
 if args.teacher_max_seq_len <= 0:
@@ -364,6 +377,7 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
         responses,
         prompt_text,
         len(prompt_ids),
+        prompt_ids,
     )
 
 
@@ -402,7 +416,7 @@ def build_student_batch(
     targets = ids[:, 1:].clone()
     targets[masks[:, 1:] == 0] = -1
 
-    teacher_valid = torch.tensor(
+    raw_teacher_valid = torch.tensor(
         [score is not None for score in teacher_scores],
         dtype=torch.bool,
         device=device,
@@ -415,8 +429,8 @@ def build_student_batch(
     # A teacher score is only useful if the same response also has at least
     # one student target after applying Engine's sampled/forced-token mask.
     student_trainable = (targets >= 0).any(dim=1)
-    teacher_valid = teacher_valid & student_trainable
-    return inputs, targets, teacher_logprobs, teacher_valid
+    teacher_valid = raw_teacher_valid & student_trainable
+    return inputs, targets, teacher_logprobs, teacher_valid, raw_teacher_valid
 
 
 # -----------------------------------------------------------------------------
@@ -474,6 +488,20 @@ def clip_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n... [truncated, {len(text) - max_chars} chars omitted]"
 
 
+def mmlu_logit_loss(prompt_ids: list[int], letters: tuple[str, ...], correct: str):
+    letter_ids = []
+    for letter in letters:
+        encoded = tokenizer.encode(letter)
+        if len(encoded) != 1:
+            return None
+        letter_ids.append(encoded[0])
+    prompt = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+    logits = student(prompt)
+    focus_logits = logits[0, -1, letter_ids].unsqueeze(0)
+    target = torch.tensor([letters.index(correct)], dtype=torch.long, device=device)
+    return F.cross_entropy(focus_logits, target)
+
+
 # -----------------------------------------------------------------------------
 # Training loop.
 
@@ -506,10 +534,16 @@ for step in range(args.num_steps):
     step_selected_responses = []
     step_candidate_count = 0
     step_teacher_valid_count = 0
+    step_raw_teacher_valid_count = 0
     step_quality_valid_count = 0
     step_metric_count = 0
     step_metric_token_count = 0
     step_terminated_count = 0
+    step_skipped_prompt_count = 0
+    step_task_reward_sum = 0.0
+    step_task_reward_count = 0
+    step_mmlu_aux_loss_sum = 0.0
+    step_mmlu_aux_count = 0
     for prompt_idx in range(args.prompts_per_step):
         # Both ranks consume the same prompt but sample different responses.
         # This keeps teacher sequence lengths and per-step work closer together.
@@ -523,6 +557,7 @@ for step in range(args.num_steps):
             responses,
             prompt_text,
             prompt_token_length,
+            prompt_ids,
         ) = sample_and_score(
             conversation,
             step,
@@ -534,6 +569,16 @@ for step in range(args.num_steps):
             len(sequence) - prompt_token_length
             for sequence in sequences
         ]
+        task_kind = "other"
+        task_rewards = []
+        for response in responses:
+            task_kind, reward = task_correctness_reward(conversation, response)
+            if task_kind == "mmlu":
+                reward *= args.mmlu_reward_weight
+            elif task_kind == "gsm8k":
+                reward *= args.gsm8k_reward_weight
+            task_rewards.append(reward)
+        task_rewards = torch.tensor(task_rewards, dtype=torch.float32, device=device)
         repetition_rates = torch.tensor(
             [
                 response_repetition_rate(sequence[prompt_token_length:])
@@ -547,15 +592,16 @@ for step in range(args.num_steps):
             dtype=torch.float32,
             device=device,
         )
-        inputs, targets, teacher_logprobs, teacher_valid = build_student_batch(
+        inputs, targets, teacher_logprobs, teacher_valid, raw_teacher_valid = build_student_batch(
             sequences,
             sampled_masks,
             termination_tokens,
             teacher_scores,
             args.eos_on_max_tokens,
         )
+        combined_teacher_logprobs = teacher_logprobs + task_rewards
         quality_scores = quality_adjusted_scores(
-            teacher_logprobs,
+            combined_teacher_logprobs,
             torch.tensor(response_lengths, dtype=torch.float32, device=device),
             repetition_rates,
             truncated,
@@ -563,7 +609,10 @@ for step in range(args.num_steps):
             repetition_penalty=args.repetition_penalty,
             truncation_penalty=args.truncation_penalty,
         )
-        quality_valid = teacher_valid & (repetition_rates <= args.max_repeat_ngram_rate)
+        quality_valid = (
+            (teacher_valid | (task_rewards > 0))
+            & (repetition_rates <= args.max_repeat_ngram_rate)
+        )
         if args.objective == "rejection":
             selected = select_teacher_ranked_samples(
                 quality_scores,
@@ -593,11 +642,28 @@ for step in range(args.num_steps):
                 print0(
                     f"RESPONSE {response_idx + 1} | teacher_logp: {score_text} | "
                     f"quality_score: {quality_scores[response_idx].item():.5f} | "
+                    f"task_reward: {task_rewards[response_idx].item():.1f} | "
                     f"repeat_rate: {repetition_rates[response_idx].item():.3f} | "
                     f"selected: {selected_text} | response_tokens: {response_tokens} | "
                     f"terminated: {termination_tokens[response_idx] is not None}"
                 )
                 print0(clip_text(responses[response_idx], args.log_samples_chars))
+
+        if task_kind == "mmlu" and args.mmlu_logit_loss_weight > 0:
+            correct_letter = mmlu_reference_letter(conversation)
+            if correct_letter is not None:
+                student.train()
+                aux_loss = mmlu_logit_loss(
+                    prompt_ids,
+                    tuple(conversation["letters"]),
+                    correct_letter,
+                )
+                if aux_loss is not None:
+                    aux_loss = aux_loss * args.mmlu_logit_loss_weight / args.prompts_per_step
+                    aux_loss.backward()
+                    step_mmlu_aux_loss_sum += aux_loss.detach().item()
+                    step_mmlu_aux_count += 1
+                    del aux_loss
 
         # Invalid or unselected rows must not contribute to the student objective.
         targets = targets.masked_fill(~metric_mask.unsqueeze(1), -1)
@@ -618,13 +684,13 @@ for step in range(args.num_steps):
         student_logprobs = torch.cat(student_logprob_chunks)
         if args.objective == "pg":
             advantages = on_policy_advantages(
-                teacher_logprobs,
+                combined_teacher_logprobs,
                 student_logprobs,
                 metric_mask,
             )
         elif args.objective == "teacher_reward":
             advantages = teacher_reward_advantages(
-                teacher_logprobs,
+                combined_teacher_logprobs,
                 metric_mask,
             )
         else:
@@ -632,30 +698,35 @@ for step in range(args.num_steps):
             # ordinary cross-entropy loss on student-generated responses.
             advantages = metric_mask.to(dtype=student_logprobs.dtype)
 
-        num_valid_tokens = (targets >= 0).sum().clamp_min(1)
+        num_valid_tokens_raw = (targets >= 0).sum()
+        num_valid_tokens = num_valid_tokens_raw.clamp_min(1)
         num_valid_sequences = metric_mask.sum()
         step_candidate_count += len(teacher_scores)
         step_teacher_valid_count += int(teacher_valid.sum().item())
+        step_raw_teacher_valid_count += int(raw_teacher_valid.sum().item())
         step_quality_valid_count += int(quality_valid.sum().item())
         step_metric_count += int(metric_mask.sum().item())
-        step_metric_token_count += int(num_valid_tokens.item())
+        step_metric_token_count += int(num_valid_tokens_raw.item())
+        step_task_reward_sum += task_rewards.sum().item()
+        step_task_reward_count += task_rewards.numel()
         selected_indices = metric_mask.nonzero(as_tuple=False).squeeze(1)
         step_selected_responses.extend(responses[i] for i in selected_indices.tolist())
-        valid_teacher_scores = teacher_logprobs[teacher_valid]
+        valid_teacher_scores = teacher_logprobs[raw_teacher_valid]
         if valid_teacher_scores.numel() > 1:
             prompt_teacher_score_stds.append(valid_teacher_scores.std(unbiased=False).item())
         if bool(metric_mask.any()):
             prompt_teacher_logprob = teacher_logprobs[metric_mask].mean().item()
+            prompt_objective_score = combined_teacher_logprobs[metric_mask].mean().item()
             prompt_student_logprob = student_logprobs[metric_mask].mean().item()
             teacher_logprob_sum += prompt_teacher_logprob * int(num_valid_sequences.item())
             student_logprob_sum += prompt_student_logprob * int(num_valid_sequences.item())
             valid_sequence_count += int(num_valid_sequences.item())
             if args.objective == "pg":
-                prompt_score = prompt_student_logprob - prompt_teacher_logprob
+                prompt_score = prompt_student_logprob - prompt_objective_score
             else:
                 # Advantages are centered within each prompt, so their mean is
-                # zero by construction. Log the raw teacher score instead.
-                prompt_score = prompt_teacher_logprob
+                # zero by construction. Log the uncentered objective score.
+                prompt_score = prompt_objective_score
             prompt_rewards.append(prompt_score)
             prompt_advantage_stds.append(advantages[metric_mask].std(unbiased=False).item())
 
@@ -678,6 +749,7 @@ for step in range(args.num_steps):
                 del token_logprobs, loss
             prompt_losses.append(prompt_loss)
         else:
+            step_skipped_prompt_count += 1
             zero_loss(student).backward()
 
         prompt_response_lengths.extend(response_lengths)
@@ -705,10 +777,14 @@ for step in range(args.num_steps):
     mean_loss = reduce_mean(sum(prompt_losses), len(prompt_losses))
     step_candidate_count = int(reduce_sum(step_candidate_count))
     step_teacher_valid_count = int(reduce_sum(step_teacher_valid_count))
+    step_raw_teacher_valid_count = int(reduce_sum(step_raw_teacher_valid_count))
     step_quality_valid_count = int(reduce_sum(step_quality_valid_count))
     step_metric_count = int(reduce_sum(step_metric_count))
     step_metric_token_count = int(reduce_sum(step_metric_token_count))
     step_terminated_count = int(reduce_sum(step_terminated_count))
+    step_skipped_prompt_count = int(reduce_sum(step_skipped_prompt_count))
+    mean_task_reward = reduce_mean(step_task_reward_sum, step_task_reward_count)
+    mean_mmlu_aux_loss = reduce_mean(step_mmlu_aux_loss_sum, step_mmlu_aux_count)
     mean_response_length = reduce_mean(
         sum(prompt_response_lengths),
         len(prompt_response_lengths),
@@ -744,16 +820,20 @@ for step in range(args.num_steps):
         print0("WARNING: zero advantage variance; this step has no learning signal")
     score_label = {
         "pg": "kl_advantage",
-        "teacher_reward": "teacher_reward",
-        "rejection": "teacher_score",
+        "teacher_reward": "objective_reward",
+        "rejection": "objective_score",
     }[args.objective]
     print0(
         f"step {step + 1:05d}/{args.num_steps} | loss: {mean_loss:.5f} | "
         f"teacher_logp: {mean_teacher_logprob:.4f} | student_logp: {mean_student_logprob:.6e} | "
         f"{score_label}: {mean_reward:.5f} | adv_std: {mean_advantage_std:.5f} | "
         f"teacher_std: {mean_teacher_score_std:.5f} | "
-        f"valid_seq: {step_metric_count}/{step_quality_valid_count}/{step_teacher_valid_count}/{step_candidate_count} | "
+        f"valid_seq: {step_metric_count}/{step_quality_valid_count}/{step_teacher_valid_count}/"
+        f"{step_raw_teacher_valid_count}/{step_candidate_count} | "
         f"valid_tokens: {step_metric_token_count} | "
+        f"skipped_prompts: {step_skipped_prompt_count} | "
+        f"task_reward: {mean_task_reward:.5f} | "
+        f"mmlu_aux_loss: {mean_mmlu_aux_loss:.5f} | "
         f"terminated: {step_terminated_count}/{step_candidate_count} | "
         f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
         f"selected_unique: {unique_selected_responses}/{len(all_selected_responses)} | "
@@ -770,10 +850,14 @@ for step in range(args.num_steps):
         "train/teacher_score_std": mean_teacher_score_std,
         "train/candidate_sequences": step_candidate_count,
         "train/teacher_valid_sequences": step_teacher_valid_count,
+        "train/raw_teacher_valid_sequences": step_raw_teacher_valid_count,
         "train/quality_valid_sequences": step_quality_valid_count,
         "train/selected_sequences": step_metric_count,
         "train/valid_tokens": step_metric_token_count,
         "train/terminated_sequences": step_terminated_count,
+        "train/skipped_prompts": step_skipped_prompt_count,
+        "train/task_reward": mean_task_reward,
+        "train/mmlu_aux_loss": mean_mmlu_aux_loss,
         "train/unique_responses": unique_responses,
         "train/unique_responses_ratio": unique_responses_ratio,
         "train/unique_selected_responses": unique_selected_responses,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -234,6 +235,52 @@ def quality_adjusted_scores(
         - repetition_penalty * repetition_rates
         - truncation_penalty * truncated.to(dtype=teacher_logprobs.dtype)
     )
+
+
+def _conversation_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(part["text"] for part in content)
+    return ""
+
+
+def mmlu_reference_letter(conversation: dict) -> str | None:
+    letters = conversation.get("letters")
+    if not letters:
+        return None
+    answer = _conversation_text(conversation["messages"][-1]["content"]).strip()
+    return answer if answer in letters else None
+
+
+def mmlu_correctness_reward(conversation: dict, response: str) -> float:
+    """Return 1 when the response contains the reference MMLU letter."""
+    correct = mmlu_reference_letter(conversation)
+    letters = conversation.get("letters")
+    if correct is None or not letters:
+        return 0.0
+    matches = re.findall(r"(?<![A-Za-z])([ABCD])(?![A-Za-z])", response.upper())
+    return float(bool(matches) and matches[-1] == correct)
+
+
+def gsm8k_correctness_reward(conversation: dict, response: str) -> float:
+    """Return 1 when the response ends with the GSM8K reference answer."""
+    reference = _conversation_text(conversation["messages"][-1]["content"])
+    reference_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", reference)
+    response_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", response)
+    if reference_match is None or response_match is None:
+        return 0.0
+    normalize = lambda value: value.replace(",", "").rstrip(".")
+    return float(normalize(reference_match.group(1)) == normalize(response_match.group(1)))
+
+
+def task_correctness_reward(conversation: dict, response: str) -> tuple[str, float]:
+    if conversation.get("letters"):
+        return "mmlu", mmlu_correctness_reward(conversation, response)
+    reference = _conversation_text(conversation["messages"][-1]["content"])
+    if "####" in reference:
+        return "gsm8k", gsm8k_correctness_reward(conversation, response)
+    return "other", 0.0
 
 
 def on_policy_kl_objective(

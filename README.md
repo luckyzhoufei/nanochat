@@ -76,6 +76,16 @@ Responses above `--max-repeat-ngram-rate` are rejected before ranking. These
 defaults prevent repeated-token sequences from winning solely because
 repetition is easy for the teacher to predict.
 
+Task correctness is added to the teacher score for supported datasets:
+
+- MMLU: reward when the final standalone answer letter matches the reference.
+- GSM8K: reward when the final `#### <number>` matches the reference.
+
+Use `--mmlu-reward-weight` and `--gsm8k-reward-weight` to configure these
+rewards. MMLU additionally receives direct four-way logit supervision at the
+`<|assistant_start|>` position through `--mmlu-logit-loss-weight`, preventing
+the categorical answer distribution from drifting toward one letter.
+
 Training logs include `unique`, `selected_unique`, `teacher_std`, `adv_std`,
 `student_logp`, and `response_len`. A collapse is indicated by
 `unique=1/8`, `teacher_std=0`, `adv_std=0`, and a near-zero `student_logp`.

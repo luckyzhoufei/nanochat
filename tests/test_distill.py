@@ -11,6 +11,8 @@ from nanochat.distill import (
     on_policy_advantages,
     on_policy_kl_objective,
     quality_adjusted_scores,
+    gsm8k_correctness_reward,
+    mmlu_correctness_reward,
     response_token_mask_from_offsets,
     response_repetition_rate,
     select_teacher_ranked_samples,
@@ -192,6 +194,29 @@ def test_quality_adjusted_scores_penalize_repetition_and_truncation():
         truncation_penalty=5.0,
     )
     assert torch.allclose(scores, torch.tensor([-7.2024, -1.02]))
+
+
+def test_mmlu_correctness_reward_uses_last_standalone_letter():
+    conversation = {
+        "letters": ("A", "B", "C", "D"),
+        "messages": [{"role": "assistant", "content": "C"}],
+    }
+    assert mmlu_correctness_reward(conversation, "The answer is C.") == 1.0
+    assert mmlu_correctness_reward(conversation, "A is tempting, but C") == 1.0
+    assert mmlu_correctness_reward(conversation, "The answer is A.") == 0.0
+
+
+def test_gsm8k_correctness_reward_compares_final_number():
+    conversation = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "work\n#### 42"}],
+            }
+        ]
+    }
+    assert gsm8k_correctness_reward(conversation, "work\n#### 42") == 1.0
+    assert gsm8k_correctness_reward(conversation, "work\n#### 41") == 0.0
 
 
 def test_on_policy_kl_objective_has_expected_gradient():
