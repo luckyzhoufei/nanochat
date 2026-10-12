@@ -42,7 +42,7 @@ from nanochat.common import (
 )
 from nanochat.distill import (
     QwenTeacher,
-    conversation_to_teacher_prompt,
+    completion_messages_to_teacher_prompt,
     fit_prompt_to_context,
     mmlu_reference_letter,
     on_policy_advantages,
@@ -316,13 +316,16 @@ def sampled_response_byte_ranges(
 @torch.no_grad()
 def sample_and_score(conversation: dict, step: int, prompt_idx: int):
     """Sample student responses and score their exact text with the teacher."""
-    prompt_ids = tokenizer.render_for_completion(conversation)
+    prompt_ids, completion_messages = tokenizer.render_for_completion(
+        conversation,
+        return_messages=True,
+    )
     prompt_ids, max_new_tokens = fit_prompt_to_context(
         prompt_ids,
         sequence_len=student.config.sequence_len,
         max_new_tokens=args.max_new_tokens,
     )
-    teacher_prompt = conversation_to_teacher_prompt(conversation)
+    teacher_prompt = completion_messages_to_teacher_prompt(completion_messages)
 
     sequences = []
     sampled_masks = []

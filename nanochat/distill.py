@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import copy
 import re
 from dataclasses import dataclass
 from typing import Any
 
 import torch
 import torch.nn.functional as F
+
+from nanochat.chat import prepare_completion_messages
 
 
 def _content_to_text(content: Any) -> str:
@@ -28,32 +29,18 @@ def conversation_to_teacher_prompt(conversation: dict) -> list[dict[str, str]]:
     rollout. System instructions are merged into the first user turn to match
     nanochat's own rendering.
     """
-    messages = copy.deepcopy(conversation["messages"])
-    if not messages:
-        raise ValueError("Conversation has no messages")
-
-    if messages[0]["role"] == "system":
-        if len(messages) < 2 or messages[1]["role"] != "user":
-            raise ValueError("A system message must be followed by a user message")
-        messages[1]["content"] = (
-            _content_to_text(messages[0]["content"])
-            + "\n\n"
-            + _content_to_text(messages[1]["content"])
-        )
-        messages = messages[1:]
-
-    if messages[-1]["role"] == "assistant":
-        prompt_messages = messages[:-1] # remove the reference assistant response
-    elif messages[-1]["role"] == "user":
-        prompt_messages = messages
-    else:
-        raise ValueError("The final message must be from the assistant or user")
-    if not prompt_messages or prompt_messages[-1]["role"] != "user":
-        raise ValueError("The prompt must end with a user message")
-
+    prompt_messages = prepare_completion_messages(conversation)
     return [
         {"role": message["role"], "content": _content_to_text(message["content"])}
         for message in prompt_messages
+    ]
+
+
+def completion_messages_to_teacher_prompt(messages: list[dict]) -> list[dict[str, str]]:
+    """Convert normalized completion messages into teacher chat messages."""
+    return [
+        {"role": message["role"], "content": _content_to_text(message["content"])}
+        for message in messages
     ]
 
 

@@ -135,6 +135,13 @@ def test_render_for_completion(tokenizer):
     stripped = tokenizer.encode("this gets stripped")
     assert not any(ids[i:i + len(stripped)] == stripped for i in range(len(ids)))
 
+    ids_with_messages, messages = tokenizer.render_for_completion(
+        conversation,
+        return_messages=True,
+    )
+    assert ids_with_messages == ids
+    assert messages == [{"role": "user", "content": "hi"}]
+
 
 def test_render_for_completion_accepts_user_ending(tokenizer):
     conversation = {"messages": [

@@ -25,6 +25,7 @@ SPECIAL_TOKENS = [
 # I verified that 2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still.
 SPLIT_PATTERN = r"""'(?i:[sdmt]|ll|ve|re)|[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}{1,2}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"""
 
+
 # -----------------------------------------------------------------------------
 # Tokenizer based on rustbpe + tiktoken combo
 import pickle
@@ -238,25 +239,22 @@ class RustBPETokenizer:
                 tokens.append(f"{GRAY}({token_id}){RESET}")
         return '|'.join(tokens)
 
-    def render_for_completion(self, conversation):
+    def render_for_completion(self, conversation, return_messages=False):
         """
         Render a conversation prompting the Assistant for a completion.
         Works with either a reference assistant message, which is removed, or
         a conversation that already ends on a user message.
         """
-        conversation = copy.deepcopy(conversation) # avoid mutating the original
-        messages = conversation["messages"]
-        assert messages, "Conversation has no messages"
-        if messages[-1]["role"] == "assistant":
-            messages.pop() # remove the reference assistant response
-        assert messages[-1]["role"] == "user", "Last message must be from the Assistant or user"
+        messages = prepare_completion_messages(conversation)
 
         # Now tokenize the conversation
-        ids, mask = self.render_conversation(conversation)
+        ids, mask = self.render_conversation({"messages": messages})
 
         # Finally, to prime the Assistant for a completion, append the Assistant start token
         assistant_start = self.encode_special("<|assistant_start|>")
         ids.append(assistant_start)
+        if return_messages:
+            return ids, messages
         return ids
 
 # -----------------------------------------------------------------------------
