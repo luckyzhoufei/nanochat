@@ -250,23 +250,39 @@ def mmlu_correctness_reward(conversation: dict, response: str) -> float:
     return float(bool(matches) and matches[-1] == correct)
 
 
-def gsm8k_correctness_reward(conversation: dict, response: str) -> float:
-    """Return 1 when the response ends with the GSM8K reference answer."""
+def gsm8k_correctness_reward(
+    conversation: dict,
+    response: str,
+    format_reward: float = 0.1,
+) -> float:
+    """Reward correct final answers and partially reward valid answer formatting."""
     reference = _conversation_text(conversation["messages"][-1]["content"])
     reference_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", reference)
-    response_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", response)
-    if reference_match is None or response_match is None:
+    if reference_match is None or "####" not in response:
         return 0.0
+    response_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", response)
+    if response_match is None:
+        return format_reward
     normalize = lambda value: value.replace(",", "").rstrip(".")
-    return float(normalize(reference_match.group(1)) == normalize(response_match.group(1)))
+    if normalize(reference_match.group(1)) == normalize(response_match.group(1)):
+        return 1.0
+    return format_reward
 
 
-def task_correctness_reward(conversation: dict, response: str) -> tuple[str, float]:
+def task_correctness_reward(
+    conversation: dict,
+    response: str,
+    gsm8k_format_reward: float = 0.1,
+) -> tuple[str, float]:
     if conversation.get("letters"):
         return "mmlu", mmlu_correctness_reward(conversation, response)
     reference = _conversation_text(conversation["messages"][-1]["content"])
     if "####" in reference:
-        return "gsm8k", gsm8k_correctness_reward(conversation, response)
+        return "gsm8k", gsm8k_correctness_reward(
+            conversation,
+            response,
+            format_reward=gsm8k_format_reward,
+        )
     return "other", 0.0
 
 

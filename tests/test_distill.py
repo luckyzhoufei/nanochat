@@ -216,7 +216,8 @@ def test_gsm8k_correctness_reward_compares_final_number():
         ]
     }
     assert gsm8k_correctness_reward(conversation, "work\n#### 42") == 1.0
-    assert gsm8k_correctness_reward(conversation, "work\n#### 41") == 0.0
+    assert gsm8k_correctness_reward(conversation, "work\n#### 41") == 0.1
+    assert gsm8k_correctness_reward(conversation, "The answer is 42") == 0.0
 
 
 def test_on_policy_kl_objective_has_expected_gradient():

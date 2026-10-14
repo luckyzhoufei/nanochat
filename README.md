@@ -79,10 +79,12 @@ repetition is easy for the teacher to predict.
 Task correctness is added to the teacher score for supported datasets:
 
 - MMLU: reward when the final standalone answer letter matches the reference.
-- GSM8K: reward when the final `#### <number>` matches the reference.
+- GSM8K: reward `1.0` for a correct `#### <number>`, `0.1` for a present but
+  incorrect final answer, and `0.0` when `####` is missing.
 
 Use `--mmlu-reward-weight` and `--gsm8k-reward-weight` to configure these
-rewards. MMLU additionally receives direct four-way logit supervision at the
+rewards. The partial GSM8K format reward is configurable with
+`--gsm8k-format-reward`. MMLU additionally receives direct four-way logit supervision at the
 `<|assistant_start|>` position through `--mmlu-logit-loss-weight`, preventing
 the categorical answer distribution from drifting toward one letter.
 

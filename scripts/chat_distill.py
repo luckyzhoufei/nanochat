@@ -137,6 +137,12 @@ parser.add_argument(
 parser.add_argument("--mmlu-reward-weight", type=float, default=1.0, help="reward for the correct MMLU letter")
 parser.add_argument("--gsm8k-reward-weight", type=float, default=1.0, help="reward for the correct GSM8K answer")
 parser.add_argument(
+    "--gsm8k-format-reward",
+    type=float,
+    default=0.1,
+    help="reward for a GSM8K response containing #### but an incorrect answer",
+)
+parser.add_argument(
     "--mmlu-logit-loss-weight",
     type=float,
     default=1.0,
@@ -195,6 +201,8 @@ if not 0.0 <= args.max_repeat_ngram_rate <= 1.0:
     parser.error("--max-repeat-ngram-rate must be in [0, 1]")
 if args.mmlu_reward_weight < 0 or args.gsm8k_reward_weight < 0 or args.mmlu_logit_loss_weight < 0:
     parser.error("task reward and logit loss weights must be non-negative")
+if not 0.0 <= args.gsm8k_format_reward <= 1.0:
+    parser.error("--gsm8k-format-reward must be in [0, 1]")
 if args.max_new_tokens <= 0:
     parser.error("--max-new-tokens must be positive")
 if args.teacher_max_seq_len <= 0:
@@ -575,7 +583,11 @@ for step in range(args.num_steps):
         task_kind = "other"
         task_rewards = []
         for response in responses:
-            task_kind, reward = task_correctness_reward(conversation, response)
+            task_kind, reward = task_correctness_reward(
+                conversation,
+                response,
+                gsm8k_format_reward=args.gsm8k_format_reward,
+            )
             if task_kind == "mmlu":
                 reward *= args.mmlu_reward_weight
             elif task_kind == "gsm8k":

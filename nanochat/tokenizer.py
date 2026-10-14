@@ -6,6 +6,8 @@ import os
 import copy
 from functools import lru_cache
 
+from nanochat.chat import prepare_completion_messages
+
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
