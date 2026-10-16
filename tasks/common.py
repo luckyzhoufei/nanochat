@@ -161,33 +161,6 @@ class TaskMixture(Task):
         return self.tasks[task_idx][local_idx]
 
 
-class BalancedTaskMixture(Task):
-    """A deterministic mixture with equal sampling probability per task."""
-
-    def __init__(self, tasks, seed=42, **kwargs):
-        super().__init__(**kwargs)
-        assert tasks, "BalancedTaskMixture requires at least one task"
-        self.tasks = tasks
-        self.lengths = [len(task) for task in tasks]
-        assert all(length > 0 for length in self.lengths), "All tasks must be non-empty"
-
-        examples_per_task = max(self.lengths)
-        self.num_conversations = examples_per_task * len(tasks)
-        self.index_map = []
-        for local_step in range(examples_per_task):
-            for task_idx, task_length in enumerate(self.lengths):
-                self.index_map.append((task_idx, local_step % task_length))
-        random.Random(seed).shuffle(self.index_map)
-
-    def num_examples(self):
-        return self.num_conversations
-
-    def get_example(self, index):
-        assert 0 <= index < self.num_conversations
-        task_idx, local_idx = self.index_map[index]
-        return self.tasks[task_idx][local_idx]
-
-
 class TaskSequence(Task):
     """
     For SFT Training sometimes we want to sequentially train on a list of tasks.

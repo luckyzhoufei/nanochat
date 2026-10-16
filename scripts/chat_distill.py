@@ -28,7 +28,6 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import wandb
 
 from nanochat.checkpoint_manager import load_model, save_checkpoint
@@ -44,7 +43,6 @@ from nanochat.distill import (
     QwenTeacher,
     completion_messages_to_teacher_prompt,
     fit_prompt_to_context,
-    mmlu_reference_letter,
     on_policy_advantages,
     on_policy_kl_objective,
     quality_adjusted_scores,
@@ -55,9 +53,7 @@ from nanochat.distill import (
     teacher_reward_advantages,
 )
 from nanochat.engine import Engine
-from tasks.common import BalancedTaskMixture
 from tasks.gsm8k import GSM8K
-from tasks.mmlu import MMLU
 
 
 parser = argparse.ArgumentParser(description="On-policy distillation for nanochat")
@@ -139,19 +135,12 @@ parser.add_argument(
     default=0.8,
     help="reject responses whose repeated 3-gram fraction exceeds this value",
 )
-parser.add_argument("--mmlu-reward-weight", type=float, default=1.0, help="reward for the correct MMLU letter")
 parser.add_argument("--gsm8k-reward-weight", type=float, default=1.0, help="reward for the correct GSM8K answer")
 parser.add_argument(
     "--gsm8k-format-reward",
     type=float,
     default=0.1,
     help="reward for a GSM8K response containing #### but an incorrect answer",
-)
-parser.add_argument(
-    "--mmlu-logit-loss-weight",
-    type=float,
-    default=1.0,
-    help="weight for direct supervision of assistant-start MMLU logits",
 )
 # Generation. These defaults keep the data exactly on-policy.
 parser.add_argument("--max-new-tokens", type=int, default=256, help="maximum response tokens")
@@ -202,7 +191,7 @@ if args.length_penalty < 0 or args.repetition_penalty < 0 or args.truncation_pen
     parser.error("quality penalties must be non-negative")
 if not 0.0 <= args.max_repeat_ngram_rate <= 1.0:
     parser.error("--max-repeat-ngram-rate must be in [0, 1]")
-if args.mmlu_reward_weight < 0 or args.gsm8k_reward_weight < 0 or args.mmlu_logit_loss_weight < 0:
+if args.gsm8k_reward_weight < 0:
     parser.error("task reward and logit loss weights must be non-negative")
 if not 0.0 <= args.gsm8k_format_reward <= 1.0:
     parser.error("--gsm8k-format-reward must be in [0, 1]")
@@ -290,15 +279,8 @@ assert teacher is not None
 # Prompt mixture. The final assistant target is used only to identify the turn
 # to replace; the student's own response is what the teacher scores.
 
-train_tasks = [
-    MMLU(subset="all", split="auxiliary_train"),
-    GSM8K(subset="main", split="train"),
-]
-train_dataset = BalancedTaskMixture(train_tasks, seed=args.seed)
-print0(
-    f"Balanced prompt mixture: {len(train_dataset):,} conversations "
-    f"(MMLU {len(train_tasks[0]):,}, GSM8K {len(train_tasks[1]):,}, 1:1 sampling)"
-)
+train_dataset = GSM8K(subset="main", split="train")
+print0(f"Prompt dataset: GSM8K {len(train_dataset):,} conversations")
 
 
 def next_seed(step: int, prompt_idx: int, sampling_idx: int) -> int:
@@ -393,7 +375,6 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
         responses,
         prompt_text,
         len(prompt_ids),
-        prompt_ids,
     )
 
 
@@ -504,20 +485,6 @@ def clip_text(text: str, max_chars: int) -> str:
     return text[:max_chars] + f"\n... [truncated, {len(text) - max_chars} chars omitted]"
 
 
-def mmlu_logit_loss(prompt_ids: list[int], letters: tuple[str, ...], correct: str):
-    letter_ids = []
-    for letter in letters:
-        encoded = tokenizer.encode(letter)
-        if len(encoded) != 1:
-            return None
-        letter_ids.append(encoded[0])
-    prompt = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    logits = student(prompt)
-    focus_logits = logits[0, -1, letter_ids].unsqueeze(0)
-    target = torch.tensor([letters.index(correct)], dtype=torch.long, device=device)
-    return F.cross_entropy(focus_logits, target)
-
-
 # -----------------------------------------------------------------------------
 # Training loop.
 
@@ -558,8 +525,6 @@ for step in range(args.num_steps):
     step_skipped_prompt_count = 0
     step_task_reward_sum = 0.0
     step_task_reward_count = 0
-    step_mmlu_aux_loss_sum = 0.0
-    step_mmlu_aux_count = 0
     for prompt_idx in range(args.prompts_per_step):
         # Both ranks consume the same prompt but sample different responses.
         # This keeps teacher sequence lengths and per-step work closer together.
@@ -573,7 +538,6 @@ for step in range(args.num_steps):
             responses,
             prompt_text,
             prompt_token_length,
-            prompt_ids,
         ) = sample_and_score(
             conversation,
             step,
@@ -595,9 +559,7 @@ for step in range(args.num_steps):
                 gsm8k_format_reward=args.gsm8k_format_reward,
             )
             raw_task_rewards.append(reward)
-            if task_kind == "mmlu":
-                reward *= args.mmlu_reward_weight
-            elif task_kind == "gsm8k":
+            if task_kind == "gsm8k":
                 reward *= args.gsm8k_reward_weight
             task_rewards.append(reward)
         raw_task_rewards = torch.tensor(raw_task_rewards, dtype=torch.float32, device=device)
@@ -675,21 +637,6 @@ for step in range(args.num_steps):
                 )
                 print0(clip_text(responses[response_idx], args.log_samples_chars))
 
-        if task_kind == "mmlu" and args.mmlu_logit_loss_weight > 0:
-            correct_letter = mmlu_reference_letter(conversation)
-            if correct_letter is not None:
-                student.train()
-                aux_loss = mmlu_logit_loss(
-                    prompt_ids,
-                    tuple(conversation["letters"]),
-                    correct_letter,
-                )
-                if aux_loss is not None:
-                    aux_loss = aux_loss * args.mmlu_logit_loss_weight / args.prompts_per_step
-                    aux_loss.backward()
-                    step_mmlu_aux_loss_sum += aux_loss.detach().item()
-                    step_mmlu_aux_count += 1
-                    del aux_loss
 
         # Invalid or unselected rows must not contribute to the student objective.
         targets = targets.masked_fill(~metric_mask.unsqueeze(1), -1)
@@ -810,7 +757,6 @@ for step in range(args.num_steps):
     step_terminated_count = int(reduce_sum(step_terminated_count))
     step_skipped_prompt_count = int(reduce_sum(step_skipped_prompt_count))
     mean_task_reward = reduce_mean(step_task_reward_sum, step_task_reward_count)
-    mean_mmlu_aux_loss = reduce_mean(step_mmlu_aux_loss_sum, step_mmlu_aux_count)
     mean_response_length = reduce_mean(
         sum(prompt_response_lengths),
         len(prompt_response_lengths),
@@ -859,7 +805,6 @@ for step in range(args.num_steps):
         f"valid_tokens: {step_metric_token_count} | "
         f"skipped_prompts: {step_skipped_prompt_count} | "
         f"task_reward: {mean_task_reward:.5f} | "
-        f"mmlu_aux_loss: {mean_mmlu_aux_loss:.5f} | "
         f"terminated: {step_terminated_count}/{step_candidate_count} | "
         f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
         f"selected_unique: {unique_selected_responses}/{len(all_selected_responses)} | "
@@ -883,7 +828,6 @@ for step in range(args.num_steps):
         "train/terminated_sequences": step_terminated_count,
         "train/skipped_prompts": step_skipped_prompt_count,
         "train/task_reward": mean_task_reward,
-        "train/mmlu_aux_loss": mean_mmlu_aux_loss,
         "train/unique_responses": unique_responses,
         "train/unique_responses_ratio": unique_responses_ratio,
         "train/unique_selected_responses": unique_selected_responses,

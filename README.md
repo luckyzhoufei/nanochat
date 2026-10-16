@@ -54,7 +54,7 @@ student-generated tokens. The older `--objective=pg` mode remains available,
 but its high-variance sequence-level policy gradient can cause catastrophic
 forgetting. By default this targets `Qwen/Qwen3.8-27B`.
 
-The distillation prompt mixture uses only MMLU and GSM8K with equal task-level sampling.
+The distillation prompt dataset is GSM8K only.
 
 Cross-tokenizer objectives can be selected explicitly:
 
@@ -86,22 +86,18 @@ correctness:
   skip the rejection update.
 - `task_all`: keep every sample in the highest available task-reward tier;
   if the highest tier is GSM8K `0.1`, this can preserve format-correct but wrong answers.
-- `correct_only`: require a fully correct MMLU/GSM8K response, then rank with teacher.
+- `correct_only`: require a fully correct GSM8K response, then rank with teacher.
 - `correct_all`: keep every fully correct response, without teacher top-k deletion
   and without falling back to GSM8K `0.1`.
 - `teacher`: retain the original teacher-only ranking behavior.
 
-Task correctness is added to the teacher score for supported datasets:
+Task correctness is added to the teacher score for GSM8K:
 
-- MMLU: reward when the final standalone answer letter matches the reference.
-- GSM8K: reward `1.0` for a correct `#### <number>`, `0.1` for a present but
-  incorrect final answer, and `0.0` when `####` is missing.
+- reward `1.0` for a correct `#### <number>`.
+- reward `0.1` for a present but incorrect final answer.
+- reward `0.0` when `####` is missing.
 
-Use `--mmlu-reward-weight` and `--gsm8k-reward-weight` to configure these
-rewards. The partial GSM8K format reward is configurable with
-`--gsm8k-format-reward`. MMLU additionally receives direct four-way logit supervision at the
-`<|assistant_start|>` position through `--mmlu-logit-loss-weight`, preventing
-the categorical answer distribution from drifting toward one letter.
+Use `--gsm8k-reward-weight` and `--gsm8k-format-reward` to configure these values.
 
 Training logs include `unique`, `selected_unique`, `teacher_std`, `adv_std`,
 `student_logp`, and `response_len`. A collapse is indicated by
