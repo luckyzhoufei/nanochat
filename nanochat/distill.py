@@ -181,24 +181,46 @@ def select_teacher_ranked_samples(
     """Select the highest-scoring valid teacher samples for SFT distillation."""
     if keep_top_k <= 0:
         raise ValueError("keep_top_k must be positive")
-    if task_mode not in {"teacher", "task_first", "correct_only"}:
+    if task_mode not in {"teacher", "task_first", "task_all", "correct_only", "correct_all"}:
         raise ValueError(f"Unknown task selection mode: {task_mode}")
     valid = valid.to(device=teacher_logprobs.device, dtype=torch.bool)
     selected = torch.zeros_like(valid)
+    if task_rewards is not None and task_mode == "task_first":
+        task_rewards = task_rewards.to(device=teacher_logprobs.device)
+        fully_correct = valid & (task_rewards >= 1.0)
+        if bool(fully_correct.any()):
+            selected[fully_correct] = True
+            return selected
+        partial_positive = valid & (task_rewards > 0)
+        if not bool(partial_positive.any()):
+            return selected
+        valid_indices = partial_positive.nonzero(as_tuple=False).squeeze(1)
+        keep = min(keep_top_k, valid_indices.numel())
+        top_local = torch.topk(teacher_logprobs[valid_indices], k=keep).indices
+        selected[valid_indices[top_local]] = True
+        return selected
     pool = valid
+    keep_all_task_samples = False
     if task_rewards is not None and task_mode != "teacher":
         task_rewards = task_rewards.to(device=teacher_logprobs.device)
         if task_mode == "correct_only":
             pool = valid & (task_rewards >= 1.0)
-        else:
+        elif task_mode == "correct_all":
+            pool = valid & (task_rewards >= 1.0)
+            keep_all_task_samples = True
+        elif task_mode == "task_all":
             task_positive = valid & (task_rewards > 0)
             if bool(task_positive.any()):
                 pool = task_positive
+                keep_all_task_samples = task_mode == "task_all"
             else:
-                pool = torch.zeros_like(valid)
+                pool = torch.zeros_like(valid) if task_kind in {"mmlu", "gsm8k"} else valid
         if bool(pool.any()):
             best_task_reward = task_rewards[pool].max()
             pool = pool & (task_rewards == best_task_reward)
+        if keep_all_task_samples and bool(pool.any()):
+            selected[pool] = True
+            return selected
     valid_indices = pool.nonzero(as_tuple=False).squeeze(1)
     if valid_indices.numel() == 0:
         return selected

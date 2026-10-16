@@ -177,7 +177,7 @@ def test_select_teacher_ranked_samples_handles_fewer_valid_than_k():
 def test_task_first_selection_prioritizes_correct_answers():
     quality_scores = torch.tensor([0.5, -1.0, -0.5])
     valid = torch.tensor([True, True, True])
-    task_rewards = torch.tensor([0.0, 1.0, 0.0])
+    task_rewards = torch.tensor([0.0, 1.0, 1.0])
     selected = select_teacher_ranked_samples(
         quality_scores,
         valid,
@@ -185,7 +185,7 @@ def test_task_first_selection_prioritizes_correct_answers():
         task_rewards=task_rewards,
         task_mode="task_first",
     )
-    assert selected.tolist() == [False, True, False]
+    assert selected.tolist() == [False, True, True]
 
 
 def test_task_first_prefers_higher_partial_reward_tier():
@@ -202,6 +202,20 @@ def test_task_first_prefers_higher_partial_reward_tier():
     assert selected.tolist() == [False, False, True]
 
 
+def test_task_all_keeps_every_correct_answer():
+    quality_scores = torch.tensor([5.0, -1.0, -2.0])
+    valid = torch.tensor([True, True, True])
+    task_rewards = torch.tensor([0.0, 1.0, 1.0])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="task_all",
+        task_kind="mmlu",
+    )
+    assert selected.tolist() == [False, True, True]
+
 def test_task_first_skips_mmlu_when_no_correct_answer_exists():
     quality_scores = torch.tensor([0.5, 0.4])
     valid = torch.tensor([True, True])
@@ -217,7 +231,7 @@ def test_task_first_skips_mmlu_when_no_correct_answer_exists():
     assert selected.tolist() == [False, False]
 
 
-def test_task_first_falls_back_to_teacher_for_non_task_data():
+def test_task_first_skips_when_no_positive_reward_exists():
     quality_scores = torch.tensor([0.5, 0.4])
     valid = torch.tensor([True, True])
     task_rewards = torch.tensor([0.0, 0.0])
@@ -229,7 +243,7 @@ def test_task_first_falls_back_to_teacher_for_non_task_data():
         task_mode="task_first",
         task_kind="other",
     )
-    assert selected.tolist() == [True, False]
+    assert selected.tolist() == [False, False]
 
 
 def test_correct_only_skips_when_no_correct_answer_exists():
@@ -322,3 +336,33 @@ def test_chunked_kl_objective_matches_full_batch():
         + on_policy_kl_objective(token_logprobs[1:], targets[1:], advantages[1:])
     )
     assert torch.allclose(full, chunked)
+
+
+def test_correct_all_keeps_every_fully_correct_answer():
+    quality_scores = torch.tensor([5.0, -1.0, -2.0])
+    valid = torch.tensor([True, True, True])
+    task_rewards = torch.tensor([0.0, 1.0, 1.0])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="correct_all",
+        task_kind="gsm8k",
+    )
+    assert selected.tolist() == [False, True, True]
+
+
+def test_correct_all_skips_format_only_answers():
+    quality_scores = torch.tensor([5.0, 4.0])
+    valid = torch.tensor([True, True])
+    task_rewards = torch.tensor([0.1, 0.1])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="correct_all",
+        task_kind="gsm8k",
+    )
+    assert selected.tolist() == [False, False]

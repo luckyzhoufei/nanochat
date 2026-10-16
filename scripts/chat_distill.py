@@ -126,9 +126,9 @@ parser.add_argument(
 parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked samples kept for rejection objective")
 parser.add_argument(
     "--selection-mode",
-    choices=["teacher", "task_first", "correct_only"],
+    choices=["teacher", "task_first", "task_all", "correct_only", "correct_all"],
     default="task_first",
-    help="task-aware filtering before teacher-ranked rejection selection",
+    help="task_first keeps all correct, otherwise teacher top-k among reward-positive samples",
 )
 parser.add_argument("--length-penalty", type=float, default=0.0002, help="quality penalty per generated token")
 parser.add_argument("--repetition-penalty", type=float, default=2.0, help="quality penalty multiplier for repeated n-grams")
