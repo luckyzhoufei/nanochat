@@ -174,6 +174,78 @@ def test_select_teacher_ranked_samples_handles_fewer_valid_than_k():
     assert selected.tolist() == [False, True]
 
 
+def test_task_first_selection_prioritizes_correct_answers():
+    quality_scores = torch.tensor([0.5, -1.0, -0.5])
+    valid = torch.tensor([True, True, True])
+    task_rewards = torch.tensor([0.0, 1.0, 0.0])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="task_first",
+    )
+    assert selected.tolist() == [False, True, False]
+
+
+def test_task_first_prefers_higher_partial_reward_tier():
+    quality_scores = torch.tensor([0.5, -1.0, -0.5])
+    valid = torch.tensor([True, True, True])
+    task_rewards = torch.tensor([0.0, 0.1, 0.1])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="task_first",
+    )
+    assert selected.tolist() == [False, False, True]
+
+
+def test_task_first_skips_mmlu_when_no_correct_answer_exists():
+    quality_scores = torch.tensor([0.5, 0.4])
+    valid = torch.tensor([True, True])
+    task_rewards = torch.tensor([0.0, 0.0])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="task_first",
+        task_kind="mmlu",
+    )
+    assert selected.tolist() == [False, False]
+
+
+def test_task_first_falls_back_to_teacher_for_non_task_data():
+    quality_scores = torch.tensor([0.5, 0.4])
+    valid = torch.tensor([True, True])
+    task_rewards = torch.tensor([0.0, 0.0])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=1,
+        task_rewards=task_rewards,
+        task_mode="task_first",
+        task_kind="other",
+    )
+    assert selected.tolist() == [True, False]
+
+
+def test_correct_only_skips_when_no_correct_answer_exists():
+    quality_scores = torch.tensor([0.5, 0.4])
+    valid = torch.tensor([True, True])
+    task_rewards = torch.tensor([0.0, 0.1])
+    selected = select_teacher_ranked_samples(
+        quality_scores,
+        valid,
+        keep_top_k=2,
+        task_rewards=task_rewards,
+        task_mode="correct_only",
+    )
+    assert selected.tolist() == [False, False]
+
+
 def test_response_repetition_rate_detects_collapse():
     assert response_repetition_rate([1] * 100) > 0.95
     assert response_repetition_rate([1, 2, 3, 4, 5]) == 0.0

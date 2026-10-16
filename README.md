@@ -76,6 +76,16 @@ Responses above `--max-repeat-ngram-rate` are rejected before ranking. These
 defaults prevent repeated-token sequences from winning solely because
 repetition is easy for the teacher to predict.
 
+Use `--selection-mode` to prevent teacher likelihood from overriding task
+correctness:
+
+- `task_first` (default): select within the highest available task-reward tier;
+  skip MMLU/GSM8K rejection updates when no positive task reward exists, while
+  falling back to teacher ranking for non-task data such as SmolTalk.
+- `correct_only`: require a fully correct MMLU/GSM8K response, otherwise skip
+  that prompt's rejection update.
+- `teacher`: retain the original teacher-only ranking behavior.
+
 Task correctness is added to the teacher score for supported datasets:
 
 - MMLU: reward when the final standalone answer letter matches the reference.

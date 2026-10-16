@@ -125,6 +125,12 @@ parser.add_argument(
     help="teacher-ranked SFT, forward-KL policy gradient, or teacher-likelihood reward",
 )
 parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked samples kept for rejection objective")
+parser.add_argument(
+    "--selection-mode",
+    choices=["teacher", "task_first", "correct_only"],
+    default="task_first",
+    help="task-aware filtering before teacher-ranked rejection selection",
+)
 parser.add_argument("--length-penalty", type=float, default=0.0002, help="quality penalty per generated token")
 parser.add_argument("--repetition-penalty", type=float, default=2.0, help="quality penalty multiplier for repeated n-grams")
 parser.add_argument("--truncation-penalty", type=float, default=5.0, help="quality penalty for unfinished responses")
@@ -581,6 +587,7 @@ for step in range(args.num_steps):
             for sequence in sequences
         ]
         task_kind = "other"
+        raw_task_rewards = []
         task_rewards = []
         for response in responses:
             task_kind, reward = task_correctness_reward(
@@ -588,11 +595,13 @@ for step in range(args.num_steps):
                 response,
                 gsm8k_format_reward=args.gsm8k_format_reward,
             )
+            raw_task_rewards.append(reward)
             if task_kind == "mmlu":
                 reward *= args.mmlu_reward_weight
             elif task_kind == "gsm8k":
                 reward *= args.gsm8k_reward_weight
             task_rewards.append(reward)
+        raw_task_rewards = torch.tensor(raw_task_rewards, dtype=torch.float32, device=device)
         task_rewards = torch.tensor(task_rewards, dtype=torch.float32, device=device)
         repetition_rates = torch.tensor(
             [
@@ -633,6 +642,9 @@ for step in range(args.num_steps):
                 quality_scores,
                 quality_valid,
                 args.keep_top_k,
+                task_rewards=raw_task_rewards,
+                task_mode=args.selection_mode,
+                task_kind=task_kind,
             )
             metric_mask = quality_valid & selected
         else:

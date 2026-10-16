@@ -174,13 +174,32 @@ def select_teacher_ranked_samples(
     teacher_logprobs: torch.Tensor,
     valid: torch.Tensor,
     keep_top_k: int,
+    task_rewards: torch.Tensor | None = None,
+    task_mode: str = "teacher",
+    task_kind: str | None = None,
 ) -> torch.Tensor:
     """Select the highest-scoring valid teacher samples for SFT distillation."""
     if keep_top_k <= 0:
         raise ValueError("keep_top_k must be positive")
+    if task_mode not in {"teacher", "task_first", "correct_only"}:
+        raise ValueError(f"Unknown task selection mode: {task_mode}")
     valid = valid.to(device=teacher_logprobs.device, dtype=torch.bool)
     selected = torch.zeros_like(valid)
-    valid_indices = valid.nonzero(as_tuple=False).squeeze(1)
+    pool = valid
+    if task_rewards is not None and task_mode != "teacher":
+        task_rewards = task_rewards.to(device=teacher_logprobs.device)
+        if task_mode == "correct_only":
+            pool = valid & (task_rewards >= 1.0)
+        else:
+            task_positive = valid & (task_rewards > 0)
+            if bool(task_positive.any()):
+                pool = task_positive
+            else:
+                pool = torch.zeros_like(valid) if task_kind in {"mmlu", "gsm8k"} else valid
+        if bool(pool.any()):
+            best_task_reward = task_rewards[pool].max()
+            pool = pool & (task_rewards == best_task_reward)
+    valid_indices = pool.nonzero(as_tuple=False).squeeze(1)
     if valid_indices.numel() == 0:
         return selected
     keep = min(keep_top_k, valid_indices.numel())
