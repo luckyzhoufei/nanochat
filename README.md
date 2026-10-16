@@ -54,6 +54,8 @@ student-generated tokens. The older `--objective=pg` mode remains available,
 but its high-variance sequence-level policy gradient can cause catastrophic
 forgetting. By default this targets `Qwen/Qwen3.8-27B`.
 
+The distillation prompt mixture uses only MMLU and GSM8K with equal task-level sampling.
+
 Cross-tokenizer objectives can be selected explicitly:
 
 - `--objective=teacher_reward`: center the teacher's full-sequence
@@ -81,7 +83,7 @@ correctness:
 
 - `task_first` (default): select within the highest available task-reward tier;
   skip MMLU/GSM8K rejection updates when no positive task reward exists, while
-  falling back to teacher ranking for non-task data such as SmolTalk.
+  falling back to teacher ranking for datasets without task correctness labels.
 - `correct_only`: require a fully correct MMLU/GSM8K response, otherwise skip
   that prompt's rejection update.
 - `teacher`: retain the original teacher-only ranking behavior.

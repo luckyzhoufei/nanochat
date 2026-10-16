@@ -195,7 +195,7 @@ def select_teacher_ranked_samples(
             if bool(task_positive.any()):
                 pool = task_positive
             else:
-                pool = torch.zeros_like(valid) if task_kind in {"mmlu", "gsm8k"} else valid
+                pool = torch.zeros_like(valid)
         if bool(pool.any()):
             best_task_reward = task_rewards[pool].max()
             pool = pool & (task_rewards == best_task_reward)

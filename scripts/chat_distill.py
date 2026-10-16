@@ -55,10 +55,9 @@ from nanochat.distill import (
     teacher_reward_advantages,
 )
 from nanochat.engine import Engine
-from tasks.common import TaskMixture
+from tasks.common import BalancedTaskMixture
 from tasks.gsm8k import GSM8K
 from tasks.mmlu import MMLU
-from tasks.smoltalk import SmolTalk
 
 
 parser = argparse.ArgumentParser(description="On-policy distillation for nanochat")
@@ -177,8 +176,6 @@ parser.add_argument(
 parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR as a fraction of the base LR")
 parser.add_argument("--warmup-ratio", type=float, default=0.03, help="fraction of steps used for linear LR warmup")
 # Data mixture.
-parser.add_argument("--mmlu-epochs", type=int, default=1, help="MMLU copies in the prompt mixture")
-parser.add_argument("--gsm8k-epochs", type=int, default=1, help="GSM8K copies in the prompt mixture")
 # Checkpointing.
 parser.add_argument("--save-every", type=int, default=50, help="save a checkpoint every N steps")
 parser.add_argument("--log-samples-every", type=int, default=50, help="print generated samples every N steps (0 = disable)")
@@ -294,12 +291,14 @@ assert teacher is not None
 # to replace; the student's own response is what the teacher scores.
 
 train_tasks = [
-    SmolTalk(split="train"),
-    *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],
-    *[GSM8K(subset="main", split="train") for _ in range(args.gsm8k_epochs)],
+    MMLU(subset="all", split="auxiliary_train"),
+    GSM8K(subset="main", split="train"),
 ]
-train_dataset = TaskMixture(train_tasks)
-print0(f"Prompt mixture: {len(train_dataset):,} conversations")
+train_dataset = BalancedTaskMixture(train_tasks, seed=args.seed)
+print0(
+    f"Balanced prompt mixture: {len(train_dataset):,} conversations "
+    f"(MMLU {len(train_tasks[0]):,}, GSM8K {len(train_tasks[1]):,}, 1:1 sampling)"
+)
 
 
 def next_seed(step: int, prompt_idx: int, sampling_idx: int) -> int:

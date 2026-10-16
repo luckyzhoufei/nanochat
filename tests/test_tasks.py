@@ -7,7 +7,7 @@ python -m pytest tests/test_tasks.py -v
 
 import numpy as np
 import pyarrow as pa
-from tasks.common import Task, TaskMixture, HubDataset, render_mc
+from tasks.common import Task, TaskMixture, BalancedTaskMixture, HubDataset, render_mc
 
 
 class ToyTask(Task):
@@ -61,6 +61,17 @@ def test_mixture_oversampling():
     # passing a task twice doubles its examples
     mixture = TaskMixture([ToyTask(n=3), ToyTask(n=3)])
     assert len(mixture) == 6
+
+
+def test_balanced_mixture_has_equal_task_probability():
+    mixture = BalancedTaskMixture([ToyTask(n=3, tag="a"), ToyTask(n=5, tag="b")])
+    assert len(mixture) == 10
+    examples = [mixture[i] for i in range(len(mixture))]
+    counts = {
+        tag: sum(example["tag"] == tag for example in examples)
+        for tag in ("a", "b")
+    }
+    assert counts == {"a": 5, "b": 5}
 
 
 def test_hub_dataset_rows():
