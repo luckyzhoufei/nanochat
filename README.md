@@ -93,9 +93,10 @@ correctness:
 
 Task correctness is added to the teacher score for GSM8K:
 
-- reward `1.0` for a correct `#### <number>`.
-- reward `0.1` for a present but incorrect final answer.
+- reward `1.0` for a correct `#### <number>` at the end of the response.
+- reward `0.1` for an incorrect `#### <number>` at the end of the response.
 - reward `0.0` when `####` is missing.
+- reward `0.0` when non-whitespace text follows the final answer.
 
 Use `--gsm8k-reward-weight` and `--gsm8k-format-reward` to configure these values.
 

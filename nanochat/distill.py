@@ -296,14 +296,14 @@ def gsm8k_correctness_reward(
     response: str,
     format_reward: float = 0.1,
 ) -> float:
-    """Reward correct final answers and partially reward valid answer formatting."""
+    """Reward answers whose final #### value is at the end of the response."""
     reference = _conversation_text(conversation["messages"][-1]["content"])
-    reference_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", reference)
-    if reference_match is None or "####" not in response:
+    reference_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)\s*$", reference)
+    if reference_match is None:
         return 0.0
-    response_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)", response)
+    response_match = re.search(r"####\s*([-+]?[0-9][0-9,.]*)\s*$", response)
     if response_match is None:
-        return format_reward
+        return 0.0
     normalize = lambda value: value.replace(",", "").rstrip(".")
     if normalize(reference_match.group(1)) == normalize(response_match.group(1)):
         return 1.0
