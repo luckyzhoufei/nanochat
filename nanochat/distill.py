@@ -170,6 +170,21 @@ def teacher_reward_advantages(
     return advantages.masked_fill(~valid, 0.0)
 
 
+def reward_baseline_advantages(
+    rewards: torch.Tensor,
+    selection_mask: torch.Tensor,
+    baseline_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Return reward-minus-baseline advantages for selected samples."""
+    selection_mask = selection_mask.to(device=rewards.device, dtype=torch.bool)
+    baseline_mask = baseline_mask.to(device=rewards.device, dtype=torch.bool)
+    advantages = torch.zeros_like(rewards, dtype=torch.float32)
+    if bool(baseline_mask.any()):
+        baseline = rewards[baseline_mask].float().mean()
+        advantages = rewards.float() - baseline
+    return advantages.masked_fill(~selection_mask, 0.0)
+
+
 def select_teacher_ranked_samples(
     teacher_logprobs: torch.Tensor,
     valid: torch.Tensor,
@@ -471,6 +486,8 @@ class QwenTeacher:
             index=labels.unsqueeze(-1),
         ).squeeze(-1)
         response_logprobs = token_logprobs[shifted_mask]
+        if not bool(torch.isfinite(response_logprobs).all()) or bool((response_logprobs > 1e-6).any()):
+            raise RuntimeError("Teacher log probabilities must be finite and non-positive")
         return TeacherScore(
             logprob=response_logprobs.mean().item(),
             num_tokens=response_logprobs.numel(),

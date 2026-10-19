@@ -46,6 +46,7 @@ from nanochat.distill import (
     on_policy_advantages,
     on_policy_kl_objective,
     quality_adjusted_scores,
+    reward_baseline_advantages,
     response_repetition_rate,
     task_correctness_reward,
     select_teacher_ranked_samples,
@@ -667,9 +668,11 @@ for step in range(args.num_steps):
                 metric_mask,
             )
         else:
-            # Selected samples receive uniform weight; the objective is an
-            # ordinary cross-entropy loss on student-generated responses.
-            advantages = metric_mask.to(dtype=student_logprobs.dtype)
+            advantages = reward_baseline_advantages(
+                rewards=quality_scores.detach(),
+                selection_mask=metric_mask,
+                baseline_mask=quality_valid,
+            )
 
         num_valid_tokens_raw = (targets >= 0).sum()
         num_valid_tokens = num_valid_tokens_raw.clamp_min(1)
