@@ -595,20 +595,10 @@ for step in range(args.num_steps):
             repetition_penalty=args.repetition_penalty,
             truncation_penalty=args.truncation_penalty,
         )
-        quality_valid = (
-            (teacher_valid | (task_rewards > 0))
-            & (repetition_rates <= args.max_repeat_ngram_rate)
-        )
+        quality_valid = repetition_rates <= args.max_repeat_ngram_rate
+
         if args.objective == "rejection":
-            selected = select_teacher_ranked_samples(
-                quality_scores,
-                quality_valid,
-                args.keep_top_k,
-                task_rewards=raw_task_rewards,
-                task_mode=args.selection_mode,
-                task_kind=task_kind,
-            )
-            metric_mask = quality_valid & selected
+            metric_mask = quality_valid
         else:
             selected = quality_valid
             metric_mask = quality_valid

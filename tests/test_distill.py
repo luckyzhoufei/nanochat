@@ -15,6 +15,7 @@ from nanochat.distill import (
     mmlu_correctness_reward,
     response_token_mask_from_offsets,
     response_repetition_rate,
+    reward_baseline_advantages,
     select_teacher_ranked_samples,
     student_sequence_logprobs,
     teacher_reward_advantages,
@@ -158,6 +159,15 @@ def test_teacher_reward_advantages_are_centered_and_masked():
     valid = torch.tensor([True, True, False])
     advantages = teacher_reward_advantages(teacher, valid)
     assert torch.allclose(advantages, torch.tensor([-0.5, 0.5, 0.0]))
+
+
+def test_reward_baseline_advantages_use_all_valid_samples_as_baseline():
+    rewards = torch.tensor([1.0, 0.5, -0.5, 5.0])
+    selected = torch.tensor([True, True, False, False])
+    baseline_valid = torch.tensor([True, True, True, False])
+    advantages = reward_baseline_advantages(rewards, selected, baseline_valid)
+    expected = torch.tensor([2.0 / 3.0, 1.0 / 6.0, 0.0, 0.0])
+    assert torch.allclose(advantages, expected, atol=1e-5)
 
 
 def test_select_teacher_ranked_samples_keeps_highest_valid_scores():
