@@ -353,18 +353,27 @@ def sample_and_score(conversation: dict, step: int, prompt_idx: int):
         response_mask = sampled_mask[len(prompt_ids):]
         response = tokenizer.decode(response_ids)
         responses.append(response)
-        sampled_ranges = sampled_response_byte_ranges(response_ids, response_mask)
-        if not sampled_ranges:
+
+    has_correct_response = any(
+        task_correctness_reward(conversation, response)[1] >= 1.0
+        for response in responses
+    )
+    for index, (sequence, sampled_mask) in enumerate(zip(sequences, sampled_masks)):
+        sampled_ranges = sampled_response_byte_ranges(
+            sequence[len(prompt_ids):],
+            sampled_mask[len(prompt_ids):],
+        )
+        if not has_correct_response or not sampled_ranges:
             teacher_scores.append(None)
-        else:
-            teacher_scores.append(
-                teacher.score_response(
-                    teacher_prompt,
-                    response,
-                    sampled_byte_ranges=sampled_ranges,
-                )
+            continue
+        teacher_scores.append(
+            teacher.score_response(
+                teacher_prompt,
+                responses[index],
+                sampled_byte_ranges=sampled_ranges,
             )
 
+        )
     if device_type == "cuda":
         torch.cuda.empty_cache()
     prompt_text = tokenizer.decode(prompt_ids)
@@ -596,6 +605,9 @@ for step in range(args.num_steps):
             truncation_penalty=args.truncation_penalty,
         )
         quality_valid = repetition_rates <= args.max_repeat_ngram_rate
+        has_correct_response = bool((raw_task_rewards >= 1.0).any())
+        if not has_correct_response:
+            quality_valid = torch.zeros_like(quality_valid)
 
         if args.objective == "rejection":
             metric_mask = quality_valid

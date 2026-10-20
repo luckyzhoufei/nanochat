@@ -98,6 +98,9 @@ Task correctness is added to the teacher score for GSM8K:
 - reward `0.0` when `####` is missing.
 - reward `0.0` when non-whitespace text follows the final answer.
 
+A prompt is skipped entirely unless at least one sampled response has
+`reward >= 1.0`; format-only `0.1` responses never enter rejection training.
+
 Use `--gsm8k-reward-weight` and `--gsm8k-format-reward` to configure these values.
 
 Training logs include `unique`, `selected_unique`, `teacher_std`, `adv_std`,
