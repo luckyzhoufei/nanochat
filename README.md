@@ -81,14 +81,14 @@ repetition is easy for the teacher to predict.
 Use `--selection-mode` to prevent teacher likelihood from overriding task
 correctness:
 
-- `task_first` (default): keep every `reward >= 1.0` sample; if none exist,
+- `task_first`: keep every `reward >= 1.0` sample; if none exist,
   select teacher top-k from `reward > 0`; if there is no positive reward,
   skip the rejection update.
 - `task_all`: keep every sample in the highest available task-reward tier;
   if the highest tier is GSM8K `0.1`, this can preserve format-correct but wrong answers.
 - `correct_only`: require a fully correct GSM8K response, then rank with teacher.
-- `correct_all`: keep every fully correct response, without teacher top-k deletion
-  and without falling back to GSM8K `0.1`.
+- `correct_all` (default): keep every fully correct response, without teacher
+  top-k deletion and without falling back to GSM8K `0.1`.
 - `teacher`: retain the original teacher-only ranking behavior.
 
 Task correctness is added to the teacher score for GSM8K:

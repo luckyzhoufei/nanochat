@@ -47,4 +47,6 @@ torchrun --standalone --nproc_per_node=2 -m scripts.chat_distill -- \
     --teacher-model="$TEACHER_MODEL" \
     --teacher-local-files-only \
     --teacher-load-in-4bit \
+    --objective=rejection \
+    --selection-mode=correct_all \
     "$@"

@@ -124,8 +124,8 @@ parser.add_argument("--keep-top-k", type=int, default=2, help="teacher-ranked sa
 parser.add_argument(
     "--selection-mode",
     choices=["teacher", "task_first", "task_all", "correct_only", "correct_all"],
-    default="task_first",
-    help="task_first keeps all correct, otherwise teacher top-k among reward-positive samples",
+    default="correct_all",
+    help="correct_all keeps all fully correct samples and drops GSM8K 0.1 fallback samples",
 )
 parser.add_argument("--length-penalty", type=float, default=0.0002, help="quality penalty per generated token")
 parser.add_argument("--repetition-penalty", type=float, default=2.0, help="quality penalty multiplier for repeated n-grams")
