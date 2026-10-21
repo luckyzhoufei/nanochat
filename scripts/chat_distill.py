@@ -476,6 +476,17 @@ def zero_loss(model: torch.nn.Module) -> torch.Tensor:
     return loss
 
 
+def reset_optimizer_momentum(optimizer) -> None:
+    """Clear stale Adam/Muon momentum after a skipped optimizer step."""
+    for state in optimizer.state.values():
+        for key in ("exp_avg", "exp_avg_sq", "momentum_buffer", "second_momentum_buffer"):
+            value = state.get(key)
+            if torch.is_tensor(value):
+                value.zero_()
+        if "step" in state:
+            state["step"] = 0
+
+
 def reduce_sum(value: float) -> float:
     tensor = torch.tensor(value, dtype=torch.float64, device=device)
     if ddp:
@@ -533,6 +544,7 @@ for step in range(args.num_steps):
     step_metric_token_count = 0
     step_terminated_count = 0
     step_skipped_prompt_count = 0
+    step_had_update = False
     step_task_reward_sum = 0.0
     step_task_reward_count = 0
     for prompt_idx in range(args.prompts_per_step):
@@ -614,6 +626,7 @@ for step in range(args.num_steps):
         else:
             selected = quality_valid
             metric_mask = quality_valid
+        step_had_update = step_had_update or bool(metric_mask.any())
 
         should_log_samples = (
             args.log_samples_every > 0
@@ -732,10 +745,19 @@ for step in range(args.num_steps):
 
         prompt_response_lengths.extend(response_lengths)
 
+    update_tensor = torch.tensor(int(step_had_update), dtype=torch.int32, device=device)
+    if ddp:
+        dist.all_reduce(update_tensor, op=dist.ReduceOp.MAX)
+    apply_optimizer_step = bool(update_tensor.item())
+    optimizer_step_skipped = not apply_optimizer_step
+
     lrm = get_lr_multiplier(step)
     for group in optimizer.param_groups:
         group["lr"] = group["initial_lr"] * lrm
-    optimizer.step()
+    if apply_optimizer_step:
+        optimizer.step()
+    else:
+        reset_optimizer_momentum(optimizer)
     optimizer.zero_grad(set_to_none=True)
     synchronize()
     step_time = time.time() - step_start
@@ -814,7 +836,8 @@ for step in range(args.num_steps):
         f"unique: {unique_responses}/{len(all_responses)} ({unique_responses_ratio:.2f}) | "
         f"selected_unique: {unique_selected_responses}/{len(all_selected_responses)} | "
         f"response_len: {mean_response_length:.1f} | "
-        f"lrm: {lrm:.3f} | dt: {step_time * 1000:.0f}ms"
+        f"lrm: {lrm:.3f} | optimizer_skipped: {optimizer_step_skipped} | "
+        f"dt: {step_time * 1000:.0f}ms"
     )
     wandb_run.log({
         "step": step + 1,
@@ -831,6 +854,7 @@ for step in range(args.num_steps):
         "train/selected_sequences": step_metric_count,
         "train/valid_tokens": step_metric_token_count,
         "train/terminated_sequences": step_terminated_count,
+        "train/optimizer_step_skipped": optimizer_step_skipped,
         "train/skipped_prompts": step_skipped_prompt_count,
         "train/task_reward": mean_task_reward,
         "train/unique_responses": unique_responses,
