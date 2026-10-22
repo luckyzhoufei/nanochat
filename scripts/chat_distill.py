@@ -606,7 +606,7 @@ for step in range(args.num_steps):
             teacher_scores,
             args.eos_on_max_tokens,
         )
-        combined_teacher_logprobs = teacher_logprobs + task_rewards
+        combined_teacher_logprobs = task_rewards
         quality_scores = quality_adjusted_scores(
             combined_teacher_logprobs,
             torch.tensor(response_lengths, dtype=torch.float32, device=device),
